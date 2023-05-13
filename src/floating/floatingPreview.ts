@@ -1,20 +1,27 @@
-import { BufferHighlight } from '@chemzqm/neovim';
-import { Disposable, disposeAll, workspace } from 'coc.nvim';
-import { Location, Range } from 'vscode-languageserver-protocol';
-import { URI } from 'vscode-uri';
+import {
+  BufferHighlight,
+  Disposable,
+  disposeAll,
+  Location,
+  Range,
+  window,
+  workspace,
+} from 'coc.nvim';
+import { isBinaryFile } from 'isbinaryfile';
 import { argOptions } from '../arg/argOptions';
 import { onBufEnter, onCursorMoved, onEvent } from '../events';
-import { Explorer } from '../explorer';
-import { Drawn } from '../painter/types';
-import { BaseTreeNode, ExplorerSource } from '../source/source';
-import { FloatingOpenOptions } from '../types';
-import { PreviewActionStrategy } from '../types/pkg-config';
+import type { Explorer } from '../explorer';
+import type { Drawn } from '../painter/types';
+import type { BaseTreeNode, ExplorerSource } from '../source/source';
+import type { FloatingOpenOptions } from '../types';
+import type { PreviewActionStrategy } from '../types/pkg-config';
 import {
   byteLength,
+  currentBufnr,
   flatten,
+  logger,
   max,
   min,
-  onError,
   readFileLines,
   supportedFloat,
 } from '../util';
@@ -37,51 +44,57 @@ type PreviewAction = (options: {
 }) => void | PreviewArguments | Promise<PreviewArguments | void>;
 
 export class FloatingPreview implements Disposable {
-  shown: boolean = false;
+  shown = false;
   disposables: Disposable[] = [];
-  maxHeight = 30;
+  maxHeight: number;
   preferTop = false;
   onHoverStrategy: false | PreviewActionStrategy = false;
 
   private nvim = workspace.nvim;
 
   constructor(public explorer: Explorer) {
-    this.disposables.push(
-      onEvent('BufWinLeave', async (bufnr) => {
-        if (bufnr === this.explorer.bufnr) {
-          await this.close();
-        }
-      }),
-      onBufEnter(async (bufnr) => {
-        if (
-          bufnr !== this.explorer.bufnr &&
-          bufnr !== this.previewWindow?.bufnr
-        ) {
-          await this.close();
-        }
-      }, 200),
-      onCursorMoved(async (bufnr) => {
-        if (this.onHoverStrategy || bufnr !== this.explorer.bufnr) {
-          return;
-        }
-        await this.close();
-      }, 200),
-      Disposable.create(() => {
-        disposeAll(this.onHoverDisposables);
-      }),
-    );
+    this.maxHeight = explorer.config.get('previewAction.content.maxHeight');
 
     this.registerActions();
 
-    const onHover = explorer.config.get('previewAction.onHover');
-    if (!onHover) {
-      return;
-    }
-    if (Array.isArray(onHover)) {
-      this.registerOnHover(onHover[0], onHover[1]);
-    } else {
-      this.registerOnHover(onHover);
-    }
+    this.disposables.push(
+      explorer.events.on('first-open-post', () => {
+        this.disposables.push(
+          onEvent('BufWinLeave', async (bufnr) => {
+            if (bufnr === this.explorer.bufnr) {
+              await this.close();
+            }
+          }),
+          onBufEnter(async (bufnr) => {
+            if (
+              bufnr !== this.explorer.bufnr &&
+              bufnr !== this.previewWindow?.bufnr
+            ) {
+              await this.closeDelay(200);
+            }
+          }, 0),
+          onCursorMoved(async (bufnr) => {
+            if (this.onHoverStrategy || bufnr !== this.explorer.bufnr) {
+              return;
+            }
+            await this.closeDelay(200);
+          }, 0),
+          Disposable.create(() => {
+            disposeAll(this.onHoverDisposables);
+          }),
+        );
+
+        const onHover = explorer.config.get('previewAction.onHover');
+        if (!onHover) {
+          return;
+        }
+        if (Array.isArray(onHover)) {
+          this.registerOnHover(onHover[0], onHover[1]);
+        } else {
+          this.registerOnHover(onHover);
+        }
+      }),
+    );
   }
 
   dispose() {
@@ -94,6 +107,10 @@ export class FloatingPreview implements Disposable {
       this.previewWindow = await FloatingWindow.create();
     }
     return this.previewWindow;
+  }
+
+  async closeDelay(ms: number) {
+    await this.previewWindow?.closeDelay(ms);
   }
 
   async close() {
@@ -110,7 +127,7 @@ export class FloatingPreview implements Disposable {
     }
   }
 
-  registerOnHover(onHoverStrategy: PreviewActionStrategy, delay: number = 300) {
+  registerOnHover(onHoverStrategy: PreviewActionStrategy, delay = 300) {
     if (this.onHoverStrategy === onHoverStrategy) {
       return;
     }
@@ -120,6 +137,10 @@ export class FloatingPreview implements Disposable {
     this.onHoverDisposables = [];
 
     const onHover = async (bufnr: number) => {
+      if (this.explorer.view.isHelpUI) {
+        await this.close();
+        return;
+      }
       if (bufnr !== this.explorer.bufnr) {
         return;
       }
@@ -147,10 +168,9 @@ export class FloatingPreview implements Disposable {
       onBufEnter(onHover, delay),
     );
 
-    onHover(workspace.bufnr).catch(onError);
+    currentBufnr().then(onHover).catch(logger.error);
 
-    // eslint-disable-next-line no-restricted-properties
-    workspace.showMessage(`Preivew ${onHoverStrategy} enabled`);
+    void window.showInformationMessage(`Preview ${onHoverStrategy} enabled`);
   }
 
   unregisterOnHover() {
@@ -161,10 +181,9 @@ export class FloatingPreview implements Disposable {
     disposeAll(this.onHoverDisposables);
     this.onHoverDisposables = [];
 
-    this.close().catch(onError);
+    this.close().catch(logger.error);
 
-    // eslint-disable-next-line no-restricted-properties
-    workspace.showMessage('Preview disabled ');
+    void window.showInformationMessage('Preview disabled ');
   }
 
   private registeredPreviewActions: Record<string, PreviewAction> = {};
@@ -174,13 +193,9 @@ export class FloatingPreview implements Disposable {
 
   registerActions() {
     this.registerAction('labeling', async ({ source, node, nodeIndex }) => {
-      const drawnList:
-        | Drawn[]
-        | undefined = await source.sourcePainters?.drawNodeLabeling(
-        node,
-        nodeIndex,
-      );
-      if (!drawnList || !this.explorer.explorerManager.inExplorer()) {
+      const drawnList: Drawn[] | undefined =
+        await source.view.sourcePainters?.drawNodeLabeling(node, nodeIndex);
+      if (!drawnList || !(await this.explorer.explorerManager.inExplorer())) {
         return;
       }
 
@@ -215,18 +230,24 @@ export class FloatingPreview implements Disposable {
       } else {
         return;
       }
-      const { uri: locUri, range } = location;
-      const doc = workspace.getDocument(locUri);
-      const uri = URI.parse(locUri);
+      const { uri, range } = location;
+
+      if (await isBinaryFile(uri)) {
+        // Skip binary file, because not supported
+        await window.showInformationMessage('Preview content skip binary');
+        return;
+      }
+
+      const doc = workspace.getDocument(uri);
       const lines = doc
         ? doc.getLines(0, range.end.line + this.maxHeight)
-        : await readFileLines(uri.fsPath, 0, range.end.line + 30);
+        : await readFileLines(uri, 0, range.end.line + this.maxHeight);
 
       return {
         lines,
         highlights: [],
         options: {
-          filepath: uri.fsPath,
+          filepath: uri,
           focusLineIndex: range.start.line,
         },
       };
@@ -271,8 +292,8 @@ export class FloatingPreview implements Disposable {
     const env = workspace.env;
     const vimColumns = env.columns;
     const vimLines = env.lines - env.cmdheight - 1;
-    const position = await this.explorer.args.value(argOptions.position);
-    const isFloating = position === 'floating';
+    const position = this.explorer.argValues.position;
+    const isFloating = position.name === 'floating';
     const floatingPosition = await this.explorer.args.value(
       argOptions.floatingPosition,
     );
@@ -280,10 +301,11 @@ export class FloatingPreview implements Disposable {
     if (!win) {
       return;
     }
-    let alignTop: boolean = false;
+    let alignTop = false;
+    const bufnr = await currentBufnr();
     let winline =
-      workspace.bufnr === this.explorer.bufnr
-        ? await this.nvim.call('winline')
+      bufnr === this.explorer.bufnr
+        ? ((await this.nvim.call('winline')) as number)
         : 1;
     winline -= 1;
     const containerWin =
@@ -293,10 +315,10 @@ export class FloatingPreview implements Disposable {
     if (!containerWin) {
       return;
     }
-    let [winTop, winLeft]: [
-      number,
-      number,
-    ] = await this.nvim.call('win_screenpos', [containerWin.id]);
+    let [winTop, winLeft]: [number, number] = await this.nvim.call(
+      'win_screenpos',
+      [containerWin.id],
+    );
     winTop -= 1;
     winLeft -= 1;
     const containerWidth = await containerWin.width;
@@ -318,9 +340,9 @@ export class FloatingPreview implements Disposable {
     const top = winTop + (alignTop ? winline - height + 1 : winline);
 
     let left: number;
-    if (position === 'left') {
+    if (position.name === 'left') {
       left = winLeft + containerWidth + 2;
-    } else if (position === 'right') {
+    } else if (position.name === 'right') {
       left = winLeft - width - 2;
     } else if (isFloating && floatingPosition === 'left-center') {
       left = winLeft + containerWidth + 1;
@@ -351,8 +373,7 @@ export class FloatingPreview implements Disposable {
     }
 
     if (!this.registeredPreviewActions[previewStrategy]) {
-      // eslint-disable-next-line no-restricted-properties
-      workspace.showMessage(
+      await window.showInformationMessage(
         `coc-explorer no support preview strategy(${previewStrategy})`,
       );
       return;

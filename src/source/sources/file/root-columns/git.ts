@@ -1,7 +1,7 @@
 import { getRootStatusIcons } from '../../../../git/config';
+import { gitHighlights } from '../../../../git/highlights';
 import { gitManager } from '../../../../git/manager';
 import { fileColumnRegistrar } from '../fileColumnRegistrar';
-import { fileHighlights } from '../fileSource';
 
 fileColumnRegistrar.registerColumn(
   'root',
@@ -13,13 +13,13 @@ fileColumnRegistrar.registerColumn(
       init() {
         subscriptions.push(gitManager.bindColumn(source));
       },
-      async available() {
-        return await gitManager.cmd.available();
-      },
       async draw() {
         return {
           labelVisible({ node }) {
             return !!gitManager.getRootStatus(node.fullpath)?.formats.length;
+          },
+          async available() {
+            return await gitManager.cmd.available();
           },
           drawNode(row, { node, isLabeling }) {
             const status = gitManager.getRootStatus(node.fullpath);
@@ -33,14 +33,14 @@ fileColumnRegistrar.registerColumn(
                 }
               }
               const hl = status.allStaged
-                ? fileHighlights.gitRootStaged
-                : fileHighlights.gitRootUnstaged;
+                ? gitHighlights.staged
+                : gitHighlights.unstaged;
               if (isLabeling) {
                 row.add(statusChars.join(' & '), {
                   hl,
                 });
               } else {
-                row.add('{' + statusChars.join('') + '}', {
+                row.add(`{${statusChars.join('')}}`, {
                   hl,
                 });
               }

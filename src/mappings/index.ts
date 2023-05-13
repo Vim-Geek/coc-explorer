@@ -1,6 +1,10 @@
 import { workspace } from 'coc.nvim';
-import { conditionActionRules, waitAction } from './actions/special';
 import {
+  conditionActionRules,
+  noopAction,
+  waitAction,
+} from '../actions/special';
+import type {
   Action,
   ActionExp,
   MappingMode,
@@ -9,8 +13,9 @@ import {
   OriginalActionExp,
   OriginalMappings,
   OriginalUserMappings,
-} from './actions/types';
-import { config } from './config';
+} from '../actions/types';
+import { config } from '../config';
+import type { Explorer } from '../types/pkg-config';
 
 type MappingConfigMode = 'none' | 'default';
 
@@ -40,6 +45,10 @@ export function toOriginalAction(action: Action): string {
   return [name, ...args].join(':');
 }
 
+export function parseMappingKey(key: string) {
+  return key.includes('<dot>') ? key.replace(/<dot>/g, '.') : key;
+}
+
 export function parseOriginalActionExp(
   originalActionExp: OriginalActionExp,
 ): ActionExp {
@@ -53,7 +62,7 @@ export function parseOriginalActionExp(
 export function parseOriginalMappings(originalMappings: OriginalMappings) {
   const mappings: Mappings = {};
   for (const [key, originalActionExp] of Object.entries(originalMappings)) {
-    mappings[key] = parseOriginalActionExp(originalActionExp);
+    mappings[parseMappingKey(key)] = parseOriginalActionExp(originalActionExp);
   }
   return mappings;
 }
@@ -66,9 +75,9 @@ function mixAndParseMappings(
   for (const [key, originalActionExp] of Object.entries(userMappings)) {
     if (originalActionExp === false) {
       delete mappings[key];
-    } else {
-      mappings[key] = parseOriginalActionExp(originalActionExp);
+      continue;
     }
+    mappings[parseMappingKey(key)] = parseOriginalActionExp(originalActionExp);
   }
   return mappings;
 }
@@ -83,16 +92,39 @@ export function getSingleAction(actionExp: ActionExp): Action | undefined {
         (action) =>
           action &&
           !(action.name in conditionActionRules) &&
-          action.name !== waitAction.name,
+          action.name !== waitAction.name &&
+          action.name !== noopAction.name,
       );
     return actions[0];
   }
 }
 
+type MouseMode = NonNullable<Explorer['explorer.mouseMode']>;
+
 class KeyMapping {
   mode = config.get<MappingConfigMode>('keyMappingMode', 'default');
 
-  configByModes: Record<
+  private readonly mouseMappings = (
+    {
+      none: {},
+      singleclick: {
+        '<LeftRelease>': [
+          'expandable?',
+          ['expanded?', 'collapse', 'expand'],
+          'open',
+        ],
+      },
+      doubleclick: {
+        '<2-LeftMouse>': [
+          'expandable?',
+          ['expanded?', 'collapse', 'expand'],
+          'open',
+        ],
+      },
+    } as Record<MouseMode, OriginalMappings>
+  )[config.get<MouseMode>('mouseMode')!];
+
+  readonly configByModes: Record<
     MappingConfigMode,
     {
       global: OriginalMappings;
@@ -116,11 +148,7 @@ class KeyMapping {
         K: ['wait', 'toggleSelection', 'normal:k'],
         gl: ['wait', 'expand:recursive'],
         gh: ['wait', 'collapse:recursive'],
-        '<2-LeftMouse>': [
-          'expandable?',
-          ['expanded?', 'collapse', 'expand'],
-          'open',
-        ],
+        ...this.mouseMappings,
         o: ['wait', 'expanded?', 'collapse', 'expand'],
         '<cr>': ['wait', 'expandable?', 'cd', 'open'],
         e: 'open',
@@ -139,10 +167,15 @@ class KeyMapping {
         yp: 'copyFilepath',
         yn: 'copyFilename',
         yy: 'copyFile',
-        yY: 'copyFile:replace',
+        yt: 'copyFile:toggle',
+        ya: 'copyFile:append',
+        'y<space>': 'clearCopyOrCut',
         dd: 'cutFile',
-        dD: 'cutFile:replace',
-        p: 'pasteFile',
+        dt: 'cutFile:toggle',
+        da: 'cutFile:append',
+        'd<space>': 'clearCopyOrCut',
+        p: ['pasteFile', 'clearCopyOrCut'],
+        P: 'pasteFile',
         df: 'delete',
         dF: 'deleteForever',
 
@@ -151,7 +184,7 @@ class KeyMapping {
         r: 'rename',
 
         zh: 'toggleHidden',
-        'g.': 'toggleHidden',
+        'g<dot>': 'toggleHidden',
         R: 'refresh',
 
         '?': 'help',
@@ -161,7 +194,7 @@ class KeyMapping {
         gd: 'listDrive',
 
         f: 'search',
-        F: 'searchRecursive',
+        F: 'search:recursive',
 
         gf: 'gotoSource:file',
         gb: 'gotoSource:buffer',
@@ -221,7 +254,7 @@ class KeyMapping {
     return this.vmapMappings_;
   }
 
-  private allSourceMappings_?: Record<string, Mappings>;
+  private allSourceMappings_?: Map<string, Mappings>;
   allSourceMappings() {
     if (!this.allSourceMappings_) {
       const defaultSources = this.config.sources ?? {};
@@ -229,22 +262,23 @@ class KeyMapping {
         'keyMappings.sources',
         {},
       );
-      this.allSourceMappings_ = {};
+      this.allSourceMappings_ = new Map();
       for (const [type, sourceMappings] of Object.entries(defaultSources)) {
-        this.allSourceMappings_[type] = {
+        this.allSourceMappings_.set(type, {
           ...parseOriginalMappings(sourceMappings),
-        };
+        });
       }
       for (const [type, sourceMappings] of Object.entries(userSources)) {
-        if (type in this.allSourceMappings_) {
-          this.allSourceMappings_[type] = mixAndParseMappings(
-            this.allSourceMappings_[type],
-            sourceMappings,
+        const mappings = this.allSourceMappings_.get(type);
+        if (mappings) {
+          this.allSourceMappings_.set(
+            type,
+            mixAndParseMappings(mappings, sourceMappings),
           );
         } else {
-          this.allSourceMappings_[type] = mixAndParseMappings(
-            {},
-            sourceMappings,
+          this.allSourceMappings_.set(
+            type,
+            mixAndParseMappings({}, sourceMappings),
           );
         }
       }
@@ -253,7 +287,7 @@ class KeyMapping {
   }
 
   sourceMappings(sourceType: string): Mappings | undefined {
-    return this.allSourceMappings()[sourceType];
+    return this.allSourceMappings().get(sourceType);
   }
 
   private async filterEscForVim(keys: Set<string>) {
@@ -270,7 +304,7 @@ class KeyMapping {
     for (const key of Object.keys(this.globalMappings())) {
       keys.add(key);
     }
-    for (const sourceMappings of Object.values(this.allSourceMappings())) {
+    for (const sourceMappings of this.allSourceMappings().values()) {
       for (const key of Object.keys(sourceMappings)) {
         keys.add(key);
       }
@@ -304,9 +338,7 @@ class KeyMapping {
     return sourceMappings?.[key] ?? globalMappings[key];
   }
 
-  async getMappings(
-    sourceType: string,
-  ): Promise<{
+  async getMappings(sourceType: string): Promise<{
     all: Mappings;
     vmap: Mappings;
   }> {

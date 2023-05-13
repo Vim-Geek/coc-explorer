@@ -1,73 +1,91 @@
-import { Notifier } from 'coc-helper';
+import { HelperEventEmitter, Notifier } from 'coc-helper';
 import {
   Buffer,
   Disposable,
   disposeAll,
   ExtensionContext,
+  window,
   Window,
   workspace,
 } from 'coc.nvim';
 import pFilter from 'p-filter';
 import { ActionExplorer } from './actions/actionExplorer';
 import { loadGlobalActions } from './actions/globalActions';
-import { MappingMode } from './actions/types';
-import { argOptions } from './arg/argOptions';
-import { ExplorerConfig } from './config';
+import type { MappingMode } from './actions/types';
+import { argOptions, ResolvedArgs } from './arg/argOptions';
+import type { ArgContentWidthTypes, Args } from './arg/parseArgs';
+import { ExplorerConfig, getRevealWhenOpen } from './config';
 import { BuffuerContextVars } from './contextVariables';
 import { doUserAutocmd, doUserAutocmdNotifier, onEvent } from './events';
-import { ExplorerManager } from './explorerManager';
+import type { ExplorerManager } from './explorerManager';
 import { FloatingPreview } from './floating/floatingPreview';
 import { quitHelp, showHelp } from './help';
 import { HighlightExplorer } from './highlight/highlightExplorer';
 import { LocatorExplorer } from './locator/locatorExplorer';
-import { ArgContentWidthTypes, Args } from './arg/parseArgs';
+import type { Rooter, RooterOpened } from './rooter';
 import './source/load';
-import { BaseTreeNode, ExplorerSource } from './source/source';
+import type { BaseTreeNode, ExplorerSource } from './source/source';
 import { sourceManager } from './source/sourceManager';
-import { ExplorerOpenOptions } from './types';
+import type { ExplorerOpenOptions } from './types';
 import {
   closeWinByBufnrNotifier,
+  currentBufnr,
+  logger,
   normalizePath,
   sum,
   winByWinid,
   winidByWinnr,
   winnrByBufnr,
 } from './util';
+import type { RendererExplorer } from './view/rendererExplorer';
 import { ViewExplorer } from './view/viewExplorer';
 
 export class Explorer implements Disposable {
   nvim = workspace.nvim;
-  inited = new BuffuerContextVars<boolean>('inited', this);
-  sourceWinid = new BuffuerContextVars<number>('sourceWinid', this);
-  sourceBufnr = new BuffuerContextVars<number>('sourceBufnr', this);
   context: ExtensionContext;
+  inited: BuffuerContextVars<boolean>;
+  sourceWinid: BuffuerContextVars<number>;
+  sourceBufnr: BuffuerContextVars<number>;
+  buffer: Buffer;
   floatingPreview: FloatingPreview;
+  storedSize: { width?: number; height?: number } | undefined;
   contentWidth = 0;
   action = new ActionExplorer(this);
   highlight = new HighlightExplorer(this);
   view = new ViewExplorer(this);
   locator = new LocatorExplorer(this);
+  events = new HelperEventEmitter<{
+    'open-pre': () => void | Promise<void>;
+    'first-open-pre': () => void | Promise<void>;
+    'open-post': () => void | Promise<void>;
+    'first-open-post': () => void | Promise<void>;
+  }>(logger);
+  firstOpened = false;
+  rooter?: RooterOpened;
 
   private disposables: Disposable[] = [];
-  private _buffer?: Buffer;
-  private _rootUri?: string;
-  private _args?: Args;
-  private _sources?: ExplorerSource<any>[];
-  private lastArgSourcesEnabledJson?: string;
+  private root_?: string;
+  private args_?: Args;
+  private argValues_?: ResolvedArgs;
+  private isFloating_?: boolean;
+  private sources_?: ExplorerSource<any>[];
+  private prevArgSourcesEnabledJson?: string;
   private isHide = false;
 
-  private static async genExplorerPosition(args: Args) {
-    let width: number = 0;
-    let height: number = 0;
-    let left: number = 0;
-    let top: number = 0;
-    const position = await args.value(argOptions.position);
+  private static genExplorerPosition(
+    args: ResolvedArgs,
+    specialSize?: { width?: number; height?: number },
+  ) {
+    let width = 0;
+    let height = 0;
+    let left = 0;
+    let top = 0;
 
-    if (position !== 'floating') {
-      width = await args.value(argOptions.width);
+    if (args.position.name !== 'floating') {
+      width = specialSize?.width ?? args.width;
     } else {
-      width = await args.value(argOptions.floatingWidth);
-      height = await args.value(argOptions.floatingHeight);
+      width = specialSize?.width ?? args.floatingWidth;
+      height = specialSize?.height ?? args.floatingHeight;
       const [vimWidth, vimHeight] = [
         workspace.env.columns,
         workspace.env.lines - workspace.env.cmdheight,
@@ -78,7 +96,7 @@ export class Explorer implements Disposable {
       if (height <= 0) {
         height = vimHeight + height;
       }
-      const floatingPosition = await args.value(argOptions.floatingPosition);
+      const floatingPosition = args.floatingPosition;
       if (floatingPosition === 'left-center') {
         left = 0;
         top = (vimHeight - height) / 2;
@@ -100,31 +118,27 @@ export class Explorer implements Disposable {
 
   static async create(
     explorerManager: ExplorerManager,
-    args: Args,
+    argValues: ResolvedArgs,
     config: ExplorerConfig,
   ) {
     explorerManager.maxExplorerID += 1;
 
-    const position = await args.value(argOptions.position);
-    const focus = await args.value(argOptions.focus);
-    const { width, height, top, left } = await this.genExplorerPosition(args);
-    const [bufnr, borderBufnr]: [
-      number,
-      number | undefined,
-    ] = await workspace.nvim.call('coc_explorer#open_explorer', [
-      explorerManager.maxExplorerID,
-      position,
-      {
-        width,
-        height,
-        left,
-        top,
-        focus,
-        border_enable: config.get('floating.border.enable'),
-        border_chars: config.get('floating.border.chars'),
-        title: config.get('floating.border.title'),
-      } as ExplorerOpenOptions,
-    ]);
+    const { width, height, top, left } = this.genExplorerPosition(argValues);
+    const [bufnr, borderBufnr]: [number, number | undefined] =
+      await workspace.nvim.call('coc_explorer#open_explorer', [
+        explorerManager.maxExplorerID,
+        argValues.position,
+        {
+          width,
+          height,
+          left,
+          top,
+          focus: argValues.focus,
+          border_enable: config.get('floating.border.enable'),
+          border_chars: config.get('floating.border.chars'),
+          title: config.get('floating.border.title'),
+        } as ExplorerOpenOptions,
+      ]);
 
     const explorer = new Explorer(
       explorerManager.maxExplorerID,
@@ -146,6 +160,16 @@ export class Explorer implements Disposable {
     public config: ExplorerConfig,
   ) {
     this.context = explorerManager.context;
+    this.buffer = this.nvim.createBuffer(this.bufnr);
+    this.inited = new BuffuerContextVars<boolean>('inited', this.buffer);
+    this.sourceWinid = new BuffuerContextVars<number>(
+      'sourceWinid',
+      this.buffer,
+    );
+    this.sourceBufnr = new BuffuerContextVars<number>(
+      'sourceBufnr',
+      this.buffer,
+    );
     this.floatingPreview = new FloatingPreview(this);
 
     if (borderBufnr) {
@@ -166,32 +190,39 @@ export class Explorer implements Disposable {
     this.disposables.forEach((s) => s.dispose());
   }
 
-  get rootUri(): string {
-    if (!this._rootUri) {
-      throw Error('Explorer rootUri not initialized yet');
+  get root(): string {
+    if (!this.root_) {
+      throw Error('Explorer root not initialized yet');
     }
-    return this._rootUri;
+    return this.root_;
   }
 
   get args(): Args {
-    if (!this._args) {
+    if (!this.args_) {
       throw Error('Explorer args not initialized yet');
     }
-    return this._args;
+    return this.args_;
   }
 
-  get buffer(): Buffer {
-    if (!this._buffer) {
-      this._buffer = this.nvim.createBuffer(this.bufnr);
+  get argValues(): ResolvedArgs {
+    if (!this.argValues_) {
+      throw Error('Explorer argValues not initialized yet');
     }
-    return this._buffer;
+    return this.argValues_;
+  }
+
+  get isFloating(): boolean {
+    if (this.isFloating_ === undefined) {
+      throw Error('Explorer isFloating not initialized yet');
+    }
+    return this.isFloating_;
   }
 
   get sources(): ExplorerSource<BaseTreeNode<any>>[] {
-    if (!this._sources) {
+    if (!this.sources_) {
       throw Error('Explorer sources not initialized yet');
     }
-    return this._sources;
+    return this.sources_;
   }
 
   get height() {
@@ -274,7 +305,7 @@ export class Explorer implements Disposable {
     const setWidth = async (
       contentWidthType: ArgContentWidthTypes,
       contentWidth: number,
-    ) => {
+    ): Promise<boolean> => {
       if (contentWidth <= 0) {
         let contentBaseWidth: number | undefined;
         if (contentWidthType === 'win-width') {
@@ -298,49 +329,66 @@ export class Explorer implements Disposable {
         this.contentWidth = contentWidth;
         return true;
       }
+      return false;
     };
 
-    const position = await this.args.value(argOptions.position);
-    if (position === 'floating') {
-      if (
-        await setWidth(
-          'win-width',
-          await this.args.value(argOptions.floatingContentWidth),
-        )
-      ) {
+    if (this.isFloating) {
+      if (await setWidth('win-width', this.argValues.floatingContentWidth)) {
         return;
       }
     }
 
-    if (
-      await setWidth(
-        await this.args.value(argOptions.contentWidthType),
-        await this.args.value(argOptions.contentWidth),
-      )
-    ) {
-      return;
-    }
+    await setWidth(
+      this.argValues.contentWidthType,
+      this.argValues.contentWidth,
+    );
   }
 
-  async resize() {
-    const position = await this.args.value(argOptions.position);
-    const { width, height, top, left } = await Explorer.genExplorerPosition(
-      this.args,
-    );
-    await this.nvim.call('coc_explorer#resize', [
-      this.bufnr,
-      position,
-      {
+  resizeNotifier(size?: [width?: number, height?: number]) {
+    return Notifier.create(() => {
+      const dimension = Explorer.genExplorerPosition(this.argValues, {
+        width: size?.[0] ?? this.storedSize?.width,
+        height: size?.[1] ?? this.storedSize?.height,
+      });
+      const { top, left, width, height } = dimension;
+      this.storedSize = {
         width,
         height,
-        left,
-        top,
-        border_bufnr: this.borderBufnr,
-        border_enable: this.config.get('floating.border.enable'),
-        border_chars: this.config.get('floating.border.chars'),
-        title: this.config.get('floating.border.title'),
-      } as ExplorerOpenOptions,
-    ]);
+      };
+      this.nvim.call(
+        'coc_explorer#resize',
+        [
+          this.bufnr,
+          this.argValues.position,
+          {
+            width,
+            height,
+            left,
+            top,
+            border_bufnr: this.borderBufnr,
+            border_enable: this.config.get('floating.border.enable'),
+            border_chars: this.config.get('floating.border.chars'),
+            title: this.config.get('floating.border.title'),
+          } as ExplorerOpenOptions,
+        ],
+        true,
+      );
+    });
+  }
+
+  async resize(size?: [width?: number, height?: number]) {
+    await this.resizeNotifier(size).run();
+  }
+
+  async adjustSize(sizeOffset?: [width?: number, height?: number]) {
+    const [widthOff = 0, heightOff = 0] = sizeOffset ?? [0, 0];
+    const dimension = Explorer.genExplorerPosition(this.argValues, {
+      width: this.storedSize?.width,
+      height: this.storedSize?.height,
+    });
+    const { width, height } = dimension;
+
+    await this.resize([width + widthOff, height + heightOff]);
   }
 
   /**
@@ -358,21 +406,20 @@ export class Explorer implements Disposable {
     return false;
   }
 
-  async resume(args: Args) {
-    const position = await args.value(argOptions.position);
-    const focus = await args.value(argOptions.focus);
-    const { width, height, top, left } = await Explorer.genExplorerPosition(
-      args,
+  async resume(argValues: ResolvedArgs) {
+    const { width, height, top, left } = Explorer.genExplorerPosition(
+      argValues,
+      this.storedSize,
     );
     await this.nvim.call('coc_explorer#resume', [
       this.bufnr,
-      position,
+      argValues.position,
       {
         width,
         height,
         left,
         top,
-        focus,
+        focus: argValues.focus,
         border_bufnr: this.borderBufnr,
         border_enable: this.config.get('floating.border.enable'),
         border_chars: this.config.get('floating.border.chars'),
@@ -381,42 +428,59 @@ export class Explorer implements Disposable {
     ]);
   }
 
-  async open(args: Args, rootPath: string, isFirst: boolean) {
+  async open(args: Args, rooter: Rooter, isFirst: boolean) {
+    let firstOpen: boolean;
+    if (!this.firstOpened) {
+      firstOpen = true;
+      this.firstOpened = true;
+    } else {
+      firstOpen = false;
+    }
+    if (firstOpen) {
+      await this.events.fire('first-open-pre');
+    }
+    await this.events.fire('open-pre');
     await doUserAutocmd('CocExplorerOpenPre');
+
+    this.rooter = rooter.open(this);
 
     if (this.view.isHelpUI) {
       await this.quitHelp();
     }
 
-    await this.highlight.addSyntax();
+    await this.highlight.bootSyntax();
 
-    const sourcesChanged = await this.initArgs(args, rootPath);
+    const sourcesChanged = await this.initArgs(args, this.rooter);
 
     for (const source of this.sources) {
       await source.bootOpen(isFirst);
     }
 
-    const notifiers: Notifier[] = [];
-    if (sourcesChanged) {
-      notifiers.push(this.clearLinesNotifier());
-    }
-    notifiers.push(
-      await this.loadAllNotifier(),
-      ...(await Promise.all(
-        this.sources.map((s) => s.openedNotifier(isFirst)),
-      )),
-    );
-    await Notifier.runAll(notifiers);
+    await this.view.sync(async (r) => {
+      const notifiers: Notifier[] = [];
+      if (sourcesChanged) {
+        notifiers.push(this.clearLinesNotifier());
+      }
+      notifiers.push(
+        await this.loadAllNotifier(r),
+        ...(await Promise.all(
+          r
+            .rendererSources()
+            .map((rs) => rs.source.openedNotifier(rs, isFirst)),
+        )),
+      );
+      await Notifier.runAll(notifiers);
 
-    await doUserAutocmd('CocExplorerOpenPost');
+      await doUserAutocmd('CocExplorerOpenPost');
+      await this.events.fire('open-post');
+      if (firstOpen) {
+        await this.events.fire('first-open-post');
+      }
+    });
   }
 
   async tryQuitOnOpenNotifier() {
-    const quitonOpen = await this.args.value(argOptions.quitOnOpen);
-    if (
-      quitonOpen ||
-      (await this.args.value(argOptions.position)) === 'floating'
-    ) {
+    if (this.argValues.quitOnOpen || this.isFloating) {
       return this.quitNotifier();
     }
     return Notifier.noop();
@@ -434,7 +498,7 @@ export class Explorer implements Disposable {
   async show() {
     if (this.isHide) {
       this.isHide = false;
-      await this.resume(this.args);
+      await this.resume(this.argValues);
     }
   }
 
@@ -443,8 +507,9 @@ export class Explorer implements Disposable {
       await doUserAutocmd('CocExplorerQuitPre');
     }
     const sourceWinnr = await this.sourceWinnr();
+    const bufnr = await currentBufnr();
     return Notifier.create(() => {
-      if (sourceWinnr && this.bufnr === workspace.bufnr) {
+      if (sourceWinnr && this.bufnr === bufnr) {
         this.nvim.command(`${sourceWinnr}wincmd w`, true);
       }
       closeWinByBufnrNotifier([this.bufnr]).notify();
@@ -459,31 +524,29 @@ export class Explorer implements Disposable {
   }
 
   /**
-   * initialize rootUri
+   * initialize root
    */
-  private async initRootUri(args: Args, rootPath: string) {
-    const rootUri = await args.value(argOptions.rootUri);
-    if (rootUri) {
-      this._rootUri = normalizePath(rootUri);
+  private async initRoot(argValues: ResolvedArgs, rooter: RooterOpened) {
+    const root = argValues.rootUri;
+    if (root) {
+      this.root_ = normalizePath(root);
       return;
     }
-    const buf = await this.sourceBuffer();
-    if (!buf) {
-      this._rootUri = normalizePath(workspace.cwd);
+
+    let reveal: string | undefined;
+    if (getRevealWhenOpen(this.config, this.argValues.revealWhenOpen)) {
+      reveal = await this.revealPath();
+    }
+    const resolvedRoot = await rooter.resolveRoot(
+      reveal,
+      this.argValues.rootStrategies,
+    );
+    if (resolvedRoot) {
+      this.root_ = normalizePath(resolvedRoot);
       return;
     }
-    const buftype = await buf.getVar('&buftype');
-    if (buftype === 'nofile') {
-      this._rootUri = normalizePath(workspace.cwd);
-      return;
-    }
-    const fullpath = this.explorerManager.bufManager.getBufferNode(buf.id)
-      ?.fullpath;
-    if (!fullpath) {
-      this._rootUri = normalizePath(workspace.cwd);
-      return;
-    }
-    this._rootUri = normalizePath(rootPath);
+
+    this.root_ = normalizePath(workspace.cwd);
   }
 
   /**
@@ -491,61 +554,78 @@ export class Explorer implements Disposable {
    *
    * @return sources changed
    */
-  private async initArgs(args: Args, rootPath: string): Promise<boolean> {
-    this._args = args;
-    await this.initRootUri(args, rootPath);
-    this.explorerManager.rootPathRecords.add(this.rootUri);
+  private async initArgs(args: Args, rooter: RooterOpened): Promise<boolean> {
+    this.args_ = args;
+    this.argValues_ = await args.values(argOptions);
+    await this.initRoot(this.argValues_, rooter);
 
     const argSources = await args.value(argOptions.sources);
     if (!argSources) {
       return false;
     }
 
-    const argSourcesEnabled = await pFilter(argSources, (s) =>
+    const enabledArgSources = await pFilter(argSources, (s) =>
       sourceManager.enabled(s.name),
     );
-    const argSourcesEnabledJson = JSON.stringify(argSourcesEnabled);
+    const argSourcesEnabledJson = JSON.stringify(enabledArgSources);
     if (
-      this.lastArgSourcesEnabledJson &&
-      this.lastArgSourcesEnabledJson === argSourcesEnabledJson
+      this.prevArgSourcesEnabledJson &&
+      this.prevArgSourcesEnabledJson === argSourcesEnabledJson
     ) {
       return false;
     }
-    this.lastArgSourcesEnabledJson = argSourcesEnabledJson;
+    this.prevArgSourcesEnabledJson = argSourcesEnabledJson;
 
-    disposeAll(this._sources ?? []);
+    disposeAll(this.sources_ ?? []);
 
-    this._sources = argSourcesEnabled.map((sourceArg) =>
+    this.sources_ = enabledArgSources.map((sourceArg) =>
       sourceManager.createSource(sourceArg.name, this, sourceArg.expand),
     );
+
+    const position = await this.args_.value(argOptions.position);
+    this.isFloating_ = position.name === 'floating';
 
     return true;
   }
 
+  async revealPath() {
+    const revealPath = await this.args.value(argOptions.reveal);
+    if (revealPath) {
+      return revealPath;
+    } else {
+      const buf = await this.sourceBuffer();
+      if (buf) {
+        return (
+          this.explorerManager.bufManager.getBufferNode(buf.id)?.fullpath ??
+          undefined
+        );
+      }
+    }
+  }
+
   async getSelectedOrCursorLineIndexes(mode: MappingMode) {
+    await this.view.refreshLineIndex();
     const lineIndexes = new Set<number>();
-    const document = await workspace.document;
     if (mode === 'v') {
-      const range = await workspace.getSelectedRange('v', document);
+      const range = await window.getSelectedRange('v');
       if (range) {
-        for (
-          let lineIndex = range.start.line;
-          lineIndex <= range.end.line;
-          lineIndex++
-        ) {
+        const startLine = range.start.line;
+        const endLine =
+          range.end.character !== 0 ? range.end.line : range.end.line - 1;
+        for (let lineIndex = startLine; lineIndex <= endLine; lineIndex++) {
           lineIndexes.add(lineIndex);
         }
         return lineIndexes;
       }
     }
-    await this.view.refreshLineIndex();
     lineIndexes.add(this.view.currentLineIndex);
     return lineIndexes;
   }
 
-  findSourceByLineIndex(
-    lineIndex: number,
-  ): { source: ExplorerSource<any>; sourceIndex: number } {
+  findSourceByLineIndex(lineIndex: number): {
+    source: ExplorerSource<any>;
+    sourceIndex: number;
+  } {
     const sourceIndex = this.sources.findIndex(
       (source) => lineIndex < source.view.endLineIndex,
     );
@@ -558,24 +638,26 @@ export class Explorer implements Disposable {
   }
 
   lineIndexesGroupBySource(lineIndexes: number[] | Set<number>) {
-    const groups: Record<
+    const groups = new Map<
       number,
       {
         source: ExplorerSource<any>;
         lineIndexes: number[];
       }
-    > = {};
+    >();
     for (const line of lineIndexes) {
       const { source, sourceIndex } = this.findSourceByLineIndex(line);
-      if (!(sourceIndex in groups)) {
-        groups[sourceIndex] = {
+      let group = groups.get(sourceIndex);
+      if (!group) {
+        group = {
           source,
           lineIndexes: [line],
         };
+        groups.set(sourceIndex, group);
       }
-      groups[sourceIndex].lineIndexes.push(line);
+      group.lineIndexes.push(line);
     }
-    return Object.values(groups);
+    return [...groups.values()];
   }
 
   setLinesNotifier(lines: string[], start: number, end: number) {
@@ -592,25 +674,25 @@ export class Explorer implements Disposable {
     return this.setLinesNotifier([], 0, -1);
   }
 
-  async loadAllNotifier({ render = true } = {}) {
+  async loadAllNotifier(renderer: RendererExplorer, { render = true } = {}) {
     this.locator.mark.removeAll();
     const notifiers = await Promise.all(
-      this.sources.map((source) =>
-        source.loadNotifier(source.view.rootNode, { render: false }),
-      ),
+      renderer
+        .rendererSources()
+        .map((r) =>
+          r.source.loadNotifier(r, r.view.rootNode, { render: false }),
+        ),
     );
     if (render) {
-      notifiers.push(await this.renderAllNotifier());
+      notifiers.push(await renderer.renderAllNotifier());
     }
     return Notifier.combine(notifiers);
   }
 
-  async renderAllNotifier() {
-    const notifiers = await Promise.all(
-      this.sources.map((s) => s.view.renderNotifier({ force: true })),
+  async render() {
+    return this.view.sync((renderer) =>
+      Notifier.run(renderer.renderAllNotifier()),
     );
-
-    return Notifier.combine(notifiers);
   }
 
   async showHelp(source: ExplorerSource<any>) {

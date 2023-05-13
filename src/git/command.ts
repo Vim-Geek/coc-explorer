@@ -1,3 +1,4 @@
+import { Emitter } from 'coc.nvim';
 import commandExists from 'command-exists';
 import pathLib from 'path';
 import { config } from '../config';
@@ -20,17 +21,43 @@ export namespace GitCommand {
 }
 
 export class GitCommand {
-  get binPath() {
+  static get binPath() {
     return config.get<string>('git.command')!;
   }
 
-  async available() {
+  static available = false;
+
+  private static loadedEmitter = new Emitter<void>();
+  private static loaded = false;
+  private static onLoaded = GitCommand.loadedEmitter.event;
+  static async waitLoaded() {
+    if (this.loaded) {
+      return;
+    }
+    return new Promise((resolve) => {
+      this.onLoaded(resolve);
+    });
+  }
+
+  static async preload() {
     try {
       await commandExists(this.binPath);
-      return true;
+      this.available = true;
     } catch (e) {
-      return false;
+      this.available = false;
+    } finally {
+      this.loaded = true;
+      this.loadedEmitter.fire();
     }
+  }
+
+  get binPath() {
+    return GitCommand.binPath;
+  }
+
+  async available() {
+    await GitCommand.waitLoaded();
+    return GitCommand.available;
   }
 
   spawn(args: string[], { cwd }: { cwd?: string } = {}) {
@@ -135,8 +162,8 @@ export class GitCommand {
       showUntrackedFiles = 'system',
       showIgnored = true,
     }: GitCommand.StatusOptions = {},
-  ): Promise<Record<string, GitStatus>> {
-    const gitStatus: Record<string, GitStatus> = {};
+  ): Promise<Map<string, GitStatus>> {
+    const gitStatus = new Map<string, GitStatus>();
 
     const args = ['status', '--porcelain'];
     if (showUntrackedFiles === true) {
@@ -179,7 +206,7 @@ export class GitCommand {
       const untracked = y === GitFormat.untracked;
 
       const fullpath = rightpath ? rightpath : leftpath;
-      gitStatus[fullpath] = {
+      gitStatus.set(fullpath, {
         fullpath,
         x,
         y,
@@ -194,7 +221,7 @@ export class GitCommand {
         unmerged,
         untracked,
         ignored,
-      };
+      });
     });
 
     return gitStatus;

@@ -1,13 +1,13 @@
-import { CodeActionProvider } from 'coc.nvim';
-import {
+import type {
   CancellationToken,
   CodeActionContext,
+  CodeActionProvider,
   Command,
   Range,
-} from 'vscode-languageserver-protocol';
-import { TextDocument } from 'vscode-languageserver-textdocument';
+  TextDocument,
+} from 'coc.nvim';
 import { ActionMenu } from './menu';
-import { ExplorerManager } from '../explorerManager';
+import type { ExplorerManager } from '../explorerManager';
 import { actionListMru } from '../lists/actions';
 import { keyMapping } from '../mappings';
 import { flatten } from '../util';
@@ -26,7 +26,7 @@ export class ActionMenuCodeActionProvider implements CodeActionProvider {
     _context: CodeActionContext,
     _token: CancellationToken,
   ): Promise<Command[]> {
-    const explorer = this.explorerManager.currentExplorer();
+    const explorer = await this.explorerManager.currentExplorer();
     if (!explorer) {
       return [];
     }
@@ -42,7 +42,7 @@ export class ActionMenuCodeActionProvider implements CodeActionProvider {
     const mruList = await actionListMru.load();
 
     return flatten(
-      Object.entries(actions)
+      [...actions.entries()]
         .filter(([actionName]) => actionName !== 'actionMenu')
         .sort(([aName], [bName]) => aName.localeCompare(bName))
         .sort(([aName], [bName]) => aName.localeCompare(bName))
@@ -65,7 +65,7 @@ export class ActionMenuCodeActionProvider implements CodeActionProvider {
           if (options.menus) {
             list.push(
               ...ActionMenu.getNormalizeMenus(options.menus).map((menu) => {
-                const fullActionName = actionName + ':' + menu.args;
+                const fullActionName = `${actionName}:${menu.args}`;
                 const keys = reverseMappings[fullActionName];
                 const key = keys ? keys.vmap ?? keys.all : '';
                 return {

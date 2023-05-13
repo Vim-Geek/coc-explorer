@@ -33,22 +33,25 @@ function! coc_explorer#util#buf_set_lines_skip_cursor(bufnr, start, end, strict_
   call setbufvar(a:bufnr, '&modifiable', 1)
   call setbufvar(a:bufnr, '&readonly', 0)
 
-  if s:is_nvim
-    let cursor = v:null
-    let winid = bufwinid(a:bufnr)
-    if winid >= 0
-      let cursor = nvim_win_get_cursor(winid)
+  try
+    if s:is_nvim
+      let cursor = v:null
+      let winid = bufwinid(a:bufnr)
+      if winid >= 0
+        let cursor = nvim_win_get_cursor(winid)
+      endif
+      call nvim_buf_set_lines(a:bufnr, a:start, a:end, a:strict_indexing, a:lines)
+      if winid >= 0
+        try
+          call nvim_win_set_cursor(winid, cursor)
+        catch
+        endtry
+      endif
+    else
+      call coc#api#call('buf_set_lines', [a:bufnr, a:start, a:end, a:strict_indexing, a:lines])
     endif
-    call nvim_buf_set_lines(a:bufnr, a:start, a:end, a:strict_indexing, a:lines)
-    if winid >= 0
-      try
-        call nvim_win_set_cursor(winid, cursor)
-      catch
-      endtry
-    endif
-  else
-    call coc#api#call('buf_set_lines', [a:bufnr, a:start, a:end, a:strict_indexing, a:lines])
-  endif
+  catch
+  endtry
 
   call setbufvar(a:bufnr, '&readonly', 1)
   call setbufvar(a:bufnr, '&modifiable', 0)
@@ -100,4 +103,24 @@ function! coc_explorer#util#strdisplayslice(str, start, end) abort
   endif
   let str = matchstr(str, '\%>' . a:start . 'v.*')
   return s:pad_end(str, a:end - a:start)
+endfunction
+
+" Open file
+function! coc_explorer#util#open_file(cmd, filepath, is_relative) abort
+  let cur_fullpath = expand('%:p')
+  if a:cmd == 'edit'
+    if cur_fullpath == a:filepath
+      return
+    endif
+    if &modified && !&hidden
+      echoerr 'Vim hidden option is off'
+      return
+    endif
+  endif
+  let path = a:filepath
+  if a:is_relative
+    let path = fnamemodify(path, ':.')
+  endif
+  let path = fnameescape(path)
+  execute a:cmd . ' ' . path
 endfunction

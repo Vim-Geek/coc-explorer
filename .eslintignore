@@ -1,1 +1,2 @@
-src/tests/coc.nvim/
+src/types/pkg-config.d.ts
+*.js

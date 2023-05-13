@@ -1,16 +1,10 @@
 import { Disposable, disposeAll, workspace } from 'coc.nvim';
 import pathLib from 'path';
+import { buffer, debounceTime, switchMap } from 'rxjs';
 import { internalEvents, onEvent } from '../events';
-import { ExplorerManager } from '../explorerManager';
-import { BaseTreeNode, ExplorerSource } from '../source/source';
-import {
-  Cancelled,
-  debounce,
-  debouncePromise,
-  mapGetWithDefault,
-  onError,
-  sum,
-} from '../util';
+import type { ExplorerManager } from '../explorerManager';
+import type { BaseTreeNode, ExplorerSource } from '../source/source';
+import { createSubject, mapGetWithDefault, sum } from '../util';
 import { gitManager } from './manager';
 import { GitIgnore, GitMixedStatus, GitRootStatus } from './types';
 
@@ -31,17 +25,20 @@ export class GitBinder {
     { refCount: number }
   > = new Map();
   /**
-   * prevStatuses[root][path] = GitMixedStatus
+   * prevStatusesMapInRoot[root][path] = GitMixedStatus
    */
-  private prevStatuses: Record<string, Record<string, GitMixedStatus>> = {};
+  private prevStatusesMapInRoot = new Map<
+    string,
+    Map<string, GitMixedStatus>
+  >();
   /**
-   * prevIgnoreStatus[root][path] = GitRootStatus
+   * prevIgnoresMapInRoot[root][path] = GitRootStatus
    */
-  private prevIgnores: Record<string, Record<string, GitIgnore>> = {};
+  private prevIgnoresMapInRoot = new Map<string, Map<string, GitIgnore>>();
   /**
-   * prevRootStatus[root] = GitRootStatus
+   * prevRootStatuses[root] = GitRootStatus
    */
-  private prevRootStatus: Record<string, GitRootStatus> = {};
+  private prevRootStatuses = new Map<string, GitRootStatus>();
   private registerForSourceDisposables: Disposable[] = [];
   private registerDisposables: Disposable[] = [];
   private inited = false;
@@ -49,7 +46,7 @@ export class GitBinder {
   explorerManager_?: ExplorerManager;
   get explorerManager() {
     if (!this.explorerManager_) {
-      throw new Error('explorerManager not initialized yet');
+      throw new Error('ExplorerSource(explorerManager) is not bound yet');
     }
     return this.explorerManager_;
   }
@@ -98,20 +95,23 @@ export class GitBinder {
     return [
       ...(['CocGitStatusChange', 'FugitiveChanged'] as const).map((event) =>
         internalEvents.on(event, async () => {
-          await this.reloadDebounce(this.sources, workspace.cwd);
+          this.reloadDebounceSubject.next({
+            sources: this.sources,
+            directory: workspace.cwd,
+          });
         }),
       ),
-      onEvent(
-        'BufWritePost',
-        debounce(500, async (bufnr) => {
-          const fullpath = this.explorerManager.bufManager.getBufferNode(bufnr)
-            ?.fullpath;
-          if (fullpath) {
-            const dirname = pathLib.dirname(fullpath);
-            await this.reloadDebounce(this.sources, dirname);
-          }
-        }),
-      ),
+      onEvent('BufWritePost', async (bufnr) => {
+        const fullpath =
+          this.explorerManager.bufManager.getBufferNode(bufnr)?.fullpath;
+        if (fullpath) {
+          const dirname = pathLib.dirname(fullpath);
+          this.reloadDebounceSubject.next({
+            sources: this.sources,
+            directory: dirname,
+          });
+        }
+      }),
     ];
   }
 
@@ -127,37 +127,25 @@ export class GitBinder {
             ? node.fullpath
             : node.fullpath && pathLib.dirname(node.fullpath);
         if (directory) {
-          this.reloadDebounce([source], directory).catch(onError);
+          this.reloadDebounceSubject.next({ sources: [source], directory });
         }
       }),
     ];
   }
 
-  protected reloadDebounceChecker = debouncePromise(200, () => {});
-  protected reloadDebounceArgs = {
-    sources: new Set<ExplorerSource<any>>(),
-    directories: new Set<string>(),
-  };
-
-  protected async reloadDebounce(
-    sources: ExplorerSource<any>[],
-    directory: string,
-  ) {
-    sources.forEach((s) => {
-      this.reloadDebounceArgs.sources.add(s);
-    });
-    this.reloadDebounceArgs.directories.add(directory);
-    const r = await this.reloadDebounceChecker();
-    if (r instanceof Cancelled) {
-      return;
-    }
-    await this.reload(
-      [...this.reloadDebounceArgs.sources],
-      [...this.reloadDebounceArgs.directories],
-    );
-    this.reloadDebounceArgs.sources.clear();
-    this.reloadDebounceArgs.directories.clear();
-  }
+  protected reloadDebounceSubject = createSubject<{
+    sources: ExplorerSource<any>[];
+    directory: string;
+  }>((sub) =>
+    sub.pipe(
+      buffer(sub.pipe(debounceTime(200))),
+      switchMap(async (list) => {
+        const sources = new Set(list.map((it) => it.sources).flat());
+        const directories = new Set(list.map((it) => it.directory));
+        await this.reload([...sources], [...directories]);
+      }),
+    ),
+  );
 
   protected async reload(
     sources: ExplorerSource<any>[],
@@ -182,17 +170,23 @@ export class GitBinder {
         allStaged: false,
         formats: [],
       };
-      if (!(root in this.prevStatuses)) {
-        this.prevStatuses[root] = {};
+      let prevStatusMap = this.prevStatusesMapInRoot.get(root);
+      if (!prevStatusMap) {
+        prevStatusMap = new Map();
+        this.prevStatusesMapInRoot.set(root, prevStatusMap);
       }
-      if (!(root in this.prevIgnores)) {
-        this.prevIgnores[root] = {};
+      let prevIgnoreMap = this.prevIgnoresMapInRoot.get(root);
+      if (!prevIgnoreMap) {
+        prevIgnoreMap = new Map();
+        this.prevIgnoresMapInRoot.set(root, prevIgnoreMap);
       }
-      if (!(root in this.prevRootStatus)) {
-        this.prevRootStatus[root] = {
+      let prevRootStatus = this.prevRootStatuses.get(root);
+      if (!prevRootStatus) {
+        prevRootStatus = {
           allStaged: false,
           formats: [],
         };
+        this.prevRootStatuses.set(root, prevRootStatus);
       }
       const addGitIgnore = (fullpath: string, gitIgnore: GitIgnore) => {
         if (gitIgnore === GitIgnore.directory) {
@@ -202,47 +196,41 @@ export class GitBinder {
         }
       };
 
-      for (const [fullpath, status] of Object.entries(statuses)) {
-        if (fullpath in this.prevStatuses[root]) {
-          if (statusEqual(this.prevStatuses[root][fullpath], status)) {
-            delete this.prevStatuses[root][fullpath];
+      for (const [fullpath, status] of statuses) {
+        const prevStatus = prevStatusMap.get(fullpath);
+        if (prevStatus) {
+          if (statusEqual(prevStatus, status)) {
+            prevStatusMap.delete(fullpath);
             continue;
           }
         }
         updatePaths.add(fullpath);
       }
-      for (const fullpath of Object.keys(this.prevStatuses[root])) {
+      for (const fullpath of prevStatusMap.keys()) {
         updatePaths.add(fullpath);
       }
 
       // ignore
-      for (const [fullpath, gitIgnore] of Object.entries(ignores)) {
-        if (fullpath in this.prevIgnores[root]) {
-          if (this.prevIgnores[root][fullpath] === gitIgnore) {
-            delete this.prevIgnores[root][fullpath];
-            continue;
-          }
+      for (const [fullpath, gitIgnore] of ignores) {
+        const prevIgnore = prevIgnoreMap.get(fullpath);
+        if (prevIgnore === gitIgnore) {
+          prevIgnoreMap.delete(fullpath);
+          continue;
         }
         addGitIgnore(fullpath, gitIgnore);
       }
-      for (const [fullpath, gitIgnore] of Object.entries(
-        this.prevIgnores[root],
-      )) {
+      for (const [fullpath, gitIgnore] of prevIgnoreMap) {
         addGitIgnore(fullpath, gitIgnore);
       }
 
       // root
-      if (
-        rootStatus &&
-        (!this.prevRootStatus ||
-          !rootStatusEqual(this.prevRootStatus[root], rootStatus))
-      ) {
+      if (rootStatus && !rootStatusEqual(prevRootStatus, rootStatus)) {
         updatePaths.add(root);
       }
 
-      this.prevStatuses[root] = statuses;
-      this.prevIgnores[root] = ignores;
-      this.prevRootStatus[root] = rootStatus;
+      this.prevStatusesMapInRoot.set(root, statuses);
+      this.prevIgnoresMapInRoot.set(root, ignores);
+      this.prevRootStatuses.set(root, rootStatus);
     }
 
     for (const source of sources) {

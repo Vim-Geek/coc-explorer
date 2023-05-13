@@ -1,28 +1,28 @@
 import { compactI } from 'coc-helper';
 import { workspace } from 'coc.nvim';
-import { argOptions } from '../arg/argOptions';
 import { gitManager } from '../git/manager';
 import { parseOriginalActionExp } from '../mappings';
 import {
+  CollapseOption,
   collapseOptionList,
+  ExpandOption,
   expandOptionList,
   MoveStrategy,
   moveStrategyList,
+  OpenCursorPosition,
+  OpenStrategy,
   openStrategyList,
   PreviewOnHoverAction,
   previewOnHoverActionList,
   previewStrategyList,
-  SelectTarget,
-  selectTargetList,
   TextobjTarget,
   textobjTargetList,
   textobjTypeList,
 } from '../types';
-import { PreviewActionStrategy } from '../types/pkg-config';
-import { enableWrapscan, scanIndexNext, scanIndexPrev } from '../util';
-import { ActionExplorer } from './actionExplorer';
+import type { PreviewActionStrategy } from '../types/pkg-config';
+import { enableWrapscan, input, scanIndexNext, scanIndexPrev } from '../util';
+import type { ActionExplorer } from './actionExplorer';
 import { openAction } from './openAction';
-import { ActionRegistrar } from './registrar';
 
 export function loadGlobalActions(action: ActionExplorer) {
   const explorer = action.owner;
@@ -35,15 +35,16 @@ export function loadGlobalActions(action: ActionExplorer) {
     },
     {
       name: 'open with position',
-      description: 'line-number,column-number',
+      description: 'line-number,column-number | keep',
     },
   ];
   const openActionMenu = {
     select: 'use select window UI',
-    'split:plain': 'use vim split',
-    'split:intelligent': 'use split like vscode',
-    'vsplit:plain': 'use vim vsplit',
-    'vsplit:intelligent':
+    'select:keep': 'use select window UI, but keep cursor in explorer',
+    'split.plain': 'use vim split',
+    'split.intelligent': 'use split like vscode',
+    'vsplit.plain': 'use vim vsplit',
+    'vsplit.intelligent':
       'use vim vsplit, but keep the explorer in the original position',
     tab: 'vim tab',
     previousBuffer: 'use last used buffer',
@@ -67,34 +68,46 @@ export function loadGlobalActions(action: ActionExplorer) {
         return;
       }
 
-      if (node.location) {
+      const [openStrategy, positionRaw] = args as [
+        OpenStrategy | undefined,
+        string | undefined,
+      ];
+
+      let cursorPosition: OpenCursorPosition | undefined;
+      if (positionRaw === 'keep') {
+        cursorPosition = positionRaw;
+      } else if (positionRaw) {
+        const [line, column] = positionRaw
+          .split(',')
+          .map((n) => parseInt(n, 10));
+        cursorPosition = {
+          lineIndex: line,
+        };
+        if (column) {
+          cursorPosition.columnIndex = column;
+        }
+      } else if (node.location) {
         const { range } = node.location;
-        await openAction(explorer, source, node, () => node.fullpath!, {
-          args,
-          position: { lineIndex: range.start.line - 1 },
-        });
-        return;
+        cursorPosition = { lineIndex: range.start.line - 1 };
       }
 
-      if (node.fullpath) {
-        await openAction(explorer, source, node, () => node.fullpath!, {
-          args,
-        });
-        return;
-      }
+      await openAction(explorer, source, node, () => node.fullpath!, {
+        openStrategy,
+        cursorPosition,
+      });
     },
     'open file or directory',
     {
       select: true,
       args: openActionArgs,
-      menus: openActionMenu,
+      menus: openActionMenu as Record<string, string>,
     },
   );
   action.addNodeAction(
     'expand',
     async ({ source, node, args }) => {
       if (node.expandable) {
-        const options = (args[0] ?? '').split('|');
+        const options = (args[0] ?? '').split('|') as ExpandOption[];
         const recursive = options.includes('recursive') || undefined;
         const compact = options.includes('compact') || undefined;
         const uncompact = options.includes('uncompact') || undefined;
@@ -129,7 +142,7 @@ export function loadGlobalActions(action: ActionExplorer) {
   action.addNodeAction(
     'collapse',
     async ({ source, node, args }) => {
-      const options = (args[0] ?? '').split('|');
+      const options = (args[0] ?? '').split('|') as CollapseOption[];
       const all = options.includes('all');
       const recursive = options.includes('recursive');
       if (all && source.view.rootNode.children) {
@@ -180,7 +193,7 @@ export function loadGlobalActions(action: ActionExplorer) {
         await gitManager.reload(root);
       }
       source.view.requestRenderNodes([
-        { nodes: nodes, withParents: true, withChildren: true },
+        { nodes, withParents: true, withChildren: true },
       ]);
     },
     'add file to git index',
@@ -199,7 +212,7 @@ export function loadGlobalActions(action: ActionExplorer) {
         await gitManager.reload(root);
       }
       source.view.requestRenderNodes([
-        { nodes: nodes, withParents: true, withChildren: true },
+        { nodes, withParents: true, withChildren: true },
       ]);
     },
     'reset file from git index',
@@ -325,6 +338,14 @@ export function loadGlobalActions(action: ActionExplorer) {
       }
     },
     'go to source',
+    {
+      args: [
+        {
+          name: 'source name',
+          description: 'buffer | file | ...',
+        },
+      ],
+    },
   );
   action.addNodeAction(
     'sourceNext',
@@ -461,6 +482,7 @@ export function loadGlobalActions(action: ActionExplorer) {
       ],
       menus: {
         labeling: 'preview for node labeling',
+        content: 'preview for node content',
       },
     },
   );
@@ -510,6 +532,8 @@ export function loadGlobalActions(action: ActionExplorer) {
         'toggle:labeling': 'toggle labeling',
         'toggle:labeling:200': 'toggle labeling with debounce',
         'toggle:content': 'toggle content',
+        'enable:content': 'enable with content',
+        'enable:labeling': 'enable with labeling',
       },
     },
   );
@@ -527,7 +551,7 @@ export function loadGlobalActions(action: ActionExplorer) {
         const begin = scanIndexPrev(
           flattenedNodes,
           currentIndex,
-          await enableWrapscan(),
+          false,
           (node) => {
             return (currentNode.level ?? 0) > (node.level ?? 0);
           },
@@ -538,7 +562,7 @@ export function loadGlobalActions(action: ActionExplorer) {
         const end = scanIndexNext(
           flattenedNodes,
           currentIndex,
-          await enableWrapscan(),
+          false,
           (node) => {
             return (currentNode.level ?? 0) > (node.level ?? 0);
           },
@@ -569,33 +593,14 @@ export function loadGlobalActions(action: ActionExplorer) {
       },
     },
   );
-  const selectOptions: Partial<ActionRegistrar.Options> = {
-    select: 'visual',
-    args: [
-      {
-        name: 'target',
-        description: selectTargetList.join(' | '),
-      },
-    ],
-    menus: {
-      sibling: 'siblings',
-      child: 'children',
-    },
-  };
   action.addNodeAction(
     'select',
-    async ({ source, node, args }) => {
-      const selectTarget = (args[0] ?? 'node') as SelectTarget;
-      if (selectTarget === 'node') {
-        source.selectedNodes.add(node);
-      } else if (selectTarget === 'sibling') {
-      } else if (selectTarget === 'child') {
-      }
-      // TODO
+    async ({ source, node }) => {
+      source.selectedNodes.add(node);
       source.view.requestRenderNodes([node]);
     },
     'select node',
-    selectOptions,
+    { select: 'visual' },
   );
   action.addNodeAction(
     'unselect',
@@ -604,7 +609,7 @@ export function loadGlobalActions(action: ActionExplorer) {
       source.view.requestRenderNodes([node]);
     },
     'unselect node',
-    selectOptions,
+    { select: 'visual' },
   );
   action.addNodeAction(
     'toggleSelection',
@@ -631,22 +636,122 @@ export function loadGlobalActions(action: ActionExplorer) {
     },
   );
 
+  // resize / adjust size
+  const parseSize = (sizeStr: string) => {
+    const [widthStr, heightStr] = sizeStr
+      .split(/,|x/)
+      .map((it) => it.trim()) as [string | undefined, string | undefined];
+    return [
+      widthStr ? parseInt(widthStr) : undefined,
+      heightStr ? parseInt(heightStr) : undefined,
+    ] as const;
+  };
+  action.addNodeAction(
+    'resize',
+    async ({ args }) => {
+      const [sizeStr] = args as [string | undefined];
+      if (!sizeStr) return;
+      const [width, height] = parseSize(sizeStr);
+
+      if (explorer.isFloating) {
+        await explorer.resize([width, height]);
+      } else {
+        await explorer.resize([width]);
+      }
+      await explorer.render();
+    },
+    'resize',
+    {
+      args: [
+        {
+          name: 'size',
+          description: '{WIDTH}x{HEIGHT} | {WIDTH},{HEIGHT}',
+        },
+      ],
+      menus: {
+        path: {
+          description: 'resize the explorer window',
+          args: '[size]',
+          async actionArgs() {
+            return [await input('input a the size:', '20,10', 'file')];
+          },
+        },
+      },
+    },
+  );
+  action.addNodeAction(
+    'adjustSize',
+    async ({ args }) => {
+      const [sizeStr] = args as [string | undefined];
+      if (!sizeStr) return;
+      const [width, height] = parseSize(sizeStr);
+
+      if (explorer.isFloating) {
+        await explorer.adjustSize([width, height]);
+      } else {
+        await explorer.adjustSize([width]);
+      }
+      await explorer.render();
+    },
+    'adjust window size',
+    {
+      args: [
+        {
+          name: 'size',
+          description: '+-{WIDTH}x+-{HEIGHT} | +-{WIDTH},+-{HEIGHT}',
+        },
+      ],
+      menus: {
+        path: {
+          description: 'resize the explorer window',
+          args: '[size]',
+          async actionArgs() {
+            return [await input('input a the size:', '+20,-10', 'file')];
+          },
+        },
+      },
+    },
+  );
+
   // other
   action.addNodeAction(
     'refresh',
     async ({ source }) => {
       source.selectedNodes.clear();
 
-      const loadNotifier = await source.loadNotifier(source.view.rootNode, {
-        force: true,
+      // FIXME hlSrcId will cause some gravity issue
+      await explorer.view.sync(async (r) => {
+        const loadNotifier = await explorer.loadAllNotifier(r);
+
+        nvim.pauseNotification();
+        source.highlight.clearHighlightsNotify();
+        loadNotifier?.notify();
+        await nvim.resumeNotification();
       });
 
-      nvim.pauseNotification();
-      source.highlight.clearHighlightsNotify();
-      loadNotifier?.notify();
-      await nvim.resumeNotification();
+      // await source.view.sync(async (r) => {
+      //   const loadNotifier = await source.loadNotifier(
+      //     r,
+      //     source.view.rootNode,
+      //     {
+      //       force: true,
+      //     },
+      //   );
+      //
+      //   nvim.pauseNotification();
+      //   source.highlight.clearHighlightsNotify();
+      //   loadNotifier?.notify();
+      //   await nvim.resumeNotification();
+      // });
     },
     'refresh',
+  );
+  action.addNodeAction(
+    'render',
+    async ({ source, node }) => {
+      await source.view.render({ node });
+    },
+    'render',
   );
   action.addNodeAction(
     'help',
@@ -655,18 +760,21 @@ export function loadGlobalActions(action: ActionExplorer) {
     },
     'show help',
   );
-  action.addNodeAction(
+  action.addNodesAction(
     'actionMenu',
-    async ({ source, node }) => {
-      await source.action.listActionMenu([node]);
+    async ({ source, nodes }) => {
+      await source.action.listActionMenu(nodes);
     },
     'show actions in coc-list',
+    {
+      select: 'visual',
+    },
   );
   action.addNodeAction(
     'normal',
     async ({ args }) => {
       if (args[0]) {
-        await nvim.command('execute "normal ' + args[0] + '"');
+        await nvim.command(`execute "normal ${args[0]}"`);
       }
     },
     'execute vim normal mode commands',
@@ -684,8 +792,7 @@ export function loadGlobalActions(action: ActionExplorer) {
   action.addNodeAction(
     'esc',
     async ({ source, mode }) => {
-      const position = await source.explorer.args.value(argOptions.position);
-      if (position === 'floating' && mode === 'n') {
+      if (source.explorer.isFloating && mode === 'n') {
         await source.explorer.quit();
       } else {
         source.view.requestRenderNodes(Array.from(source.selectedNodes));

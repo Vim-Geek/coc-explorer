@@ -1,5 +1,5 @@
 import pathLib from 'path';
-import { BaseTreeNode } from '../../source/source';
+import type { BaseTreeNode } from '../../source/source';
 import { generateUri } from '../../util';
 
 export namespace NodesHelper {
@@ -8,14 +8,14 @@ export namespace NodesHelper {
     children?: TreeNode[],
   ): TreeNode {
     const expandable = !!children;
-    return ({
+    return {
       name: pathLib.basename(path),
       fullpath: path,
       expandable,
       type: 'child',
       uid: generateUri(path, 'test'),
       children,
-    } as unknown) as TreeNode;
+    } as unknown as TreeNode;
   }
 
   export function flattenNodes<TreeNode extends BaseTreeNode<TreeNode>>(

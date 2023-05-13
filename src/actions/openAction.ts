@@ -1,78 +1,128 @@
-import { WinLayoutFinder } from 'coc-helper';
-import { workspace } from 'coc.nvim';
+import { Notifier, WinLayoutFinder } from 'coc-helper';
+import { Neovim, workspace } from 'coc.nvim';
 import { argOptions } from '../arg/argOptions';
+import type { ParsedPosition } from '../arg/parseArgs';
 import type { Explorer } from '../explorer';
-import { ArgPosition } from '../arg/parseArgs';
-import { BaseTreeNode, ExplorerSource } from '../source/source';
-import { OpenStrategy } from '../types';
-import { selectWindowsUI } from '../util';
+import type { BaseTreeNode, ExplorerSource } from '../source/source';
+import type { OpenCursorPosition, OpenStrategy } from '../types';
+import { hasOwnProperty, selectWindowsUI } from '../util';
 
-export async function openAction(
-  explorer: Explorer,
-  source: ExplorerSource<any>,
-  node: BaseTreeNode<any>,
-  getFullpath: () => string | Promise<string>,
-  {
-    openByWinnr: originalOpenByWinnr,
-    args = [],
-    position,
-  }: {
-    openByWinnr?: (winnr: number) => void | Promise<void>;
-    args?: string[];
-    position?: {
-      lineIndex: number;
-      columnIndex?: number;
-    };
-  },
-) {
-  if (node.expandable) {
-    return;
+class OpenActionContext {
+  nvim: Neovim;
+  explorerPosition: ParsedPosition;
+  openByWinnr: (winnr: number) => void | Promise<void>;
+
+  constructor(
+    public explorer: Explorer,
+    public source: ExplorerSource<any>,
+    public cursorPosition: OpenCursorPosition | undefined,
+    originalOpenByWinnr: ((winnr: number) => void | Promise<void>) | undefined,
+    public getFullpath: () => string | Promise<string>,
+    private quitOnOpenNotifier: () => Notifier | Promise<Notifier>,
+    public explorerWinid: number | undefined,
+  ) {
+    this.nvim = workspace.nvim;
+
+    // explorer position
+    this.explorerPosition = explorer.argValues.position;
+
+    // open by winnr
+    this.openByWinnr =
+      originalOpenByWinnr ??
+      (async (winnr: number) => {
+        const openNotifier = await this.openFilepathNotifier('edit');
+        await this.openWrap(() => {
+          this.nvim.command(`${winnr}wincmd w`, true);
+          openNotifier.notify();
+          if (workspace.isVim) {
+            // Avoid vim highlight not working,
+            // https://github.com/weirongxu/coc-explorer/issues/113
+            this.nvim.command('redraw', true);
+          }
+        });
+      });
   }
 
-  const { nvim } = workspace;
-
-  const getEscapePath = async () => {
-    let path = await getFullpath();
-    if (explorer.config.get('openAction.relativePath')) {
-      path = await nvim.call('fnamemodify', [path, ':.']);
-    }
-    return await nvim.call('fnameescape', [path]);
-  };
-
-  const jumpToNotify = () => {
-    if (position) {
-      nvim.call(
+  private jumpToNotify() {
+    if (this.cursorPosition === 'keep') {
+      if (!this.explorerWinid) {
+        return;
+      }
+      this.nvim.call('win_gotoid', [this.explorerWinid], true);
+    } else if (this.cursorPosition) {
+      this.nvim.call(
         'cursor',
-        [position.lineIndex + 1, (position.columnIndex ?? 0) + 1],
+        [
+          this.cursorPosition.lineIndex + 1,
+          (this.cursorPosition.columnIndex ?? 0) + 1,
+        ],
         true,
       );
     }
-  };
+  }
 
-  const openByWinnr =
-    originalOpenByWinnr ??
-    (async (winnr: number) => {
-      const quitNotifier = await explorer.tryQuitOnOpenNotifier();
-      const escapePath = await getEscapePath();
-      nvim.pauseNotification();
-      nvim.command(`${winnr}wincmd w`, true);
-      nvim.command(`edit ${escapePath}`, true);
-      jumpToNotify();
-      if (workspace.isVim) {
-        // Avoid vim highlight not working,
-        // https://github.com/weirongxu/coc-explorer/issues/113
-        nvim.command('redraw', true);
-      }
-      quitNotifier.notify();
-      await nvim.resumeNotification();
+  async openWrap(callback: () => void, options?: { earlyQuit?: boolean }) {
+    const earlyQuit = options?.earlyQuit ?? false;
+    const notifiers: Notifier.Cell[] = [];
+    if (earlyQuit) await this.explorer.tryQuitOnOpen();
+    else notifiers.push(await this.quitOnOpenNotifier());
+    const lastWinnr = await this.nvim.call('winnr', ['$']);
+    const resizeIt =
+      lastWinnr === 1 && this.explorerPosition.name !== 'floating';
+    this.nvim.pauseNotification();
+    callback();
+    Notifier.notifyAll(notifiers);
+    this.jumpToNotify();
+    if (resizeIt) this.explorer.resizeNotifier().notify();
+    await this.nvim.resumeNotification();
+  }
+
+  async openFilepathNotifier(cmd: string) {
+    const fullpath = await this.getFullpath();
+    const isRel = this.explorer.config.get('openAction.relativePath');
+    return Notifier.create(() => {
+      this.nvim.call(
+        'coc_explorer#util#open_file',
+        [cmd, fullpath, isRel],
+        true,
+      );
     });
+  }
 
-  const splitIntelligent = async (
-    position: ArgPosition,
+  async tryResize() {
+    await this.explorer.resize();
+  }
+}
+
+class OpenActions {
+  constructor(public ctx: OpenActionContext) {}
+
+  async select() {
+    const ctx = this.ctx;
+    if (ctx.explorerPosition.name === 'floating') {
+      await ctx.explorer.hide();
+    }
+    await selectWindowsUI(ctx.explorer.config, ctx.source.sourceType, {
+      onSelect: async (winnr) => {
+        await ctx.openByWinnr(winnr);
+      },
+      noChoice: async () => {
+        await this.vsplit();
+      },
+      onCancel: async () => {
+        if (ctx.explorerPosition.name === 'floating') {
+          await ctx.explorer.show();
+        }
+      },
+    });
+  }
+
+  async splitIntelligent(
     command: 'split' | 'vsplit',
     fallbackStrategy: OpenStrategy,
-  ) => {
-    const explWinid = await explorer.winid;
+  ) {
+    const ctx = this.ctx;
+    const explWinid = await ctx.explorer.winid;
     if (!explWinid) {
       return;
     }
@@ -83,138 +133,161 @@ export async function openAction(
       if (node.parent && node.parent.group.type === 'row') {
         const target =
           node.parent.group.children[
-            node.parent.indexInParent + (position === 'left' ? 1 : -1)
+            node.parent.indexInParent +
+              (ctx.explorerPosition.name === 'left' ? 1 : -1)
           ];
         if (target) {
           const targetWinid = WinLayoutFinder.getFirstLeafWinid(target);
-          const quitNotifier = await explorer.tryQuitOnOpenNotifier();
-          const escapePath = await getEscapePath();
-
-          nvim.pauseNotification();
-          nvim.call('win_gotoid', [targetWinid], true);
-          nvim.command(`${command} ${escapePath}`, true);
-          jumpToNotify();
-          quitNotifier.notify();
-          await nvim.resumeNotification();
+          const openNotifier = await ctx.openFilepathNotifier(command);
+          await ctx.openWrap(() => {
+            ctx.nvim.call('win_gotoid', [targetWinid], true);
+            openNotifier.notify();
+          });
         }
       } else {
         // only exlorer window or explorer is arranged in columns
-        await actions['vsplit:plain']();
+        await this['vsplit.plain']();
       }
     } else {
       // floating
-      await actions[fallbackStrategy]();
+      await this[fallbackStrategy]();
     }
-  };
-
-  const actions: Record<OpenStrategy, () => void | Promise<void>> = {
-    select: async () => {
-      const position = await explorer.args.value(argOptions.position);
-      if (position === 'floating') {
-        await explorer.hide();
-      }
-      await selectWindowsUI(explorer.config, source.sourceType, {
-        onSelect: async (winnr) => {
-          await openByWinnr(winnr);
-        },
-        noChoice: async () => {
-          await actions.vsplit();
-        },
-        onCancel: async () => {
-          if (position === 'floating') {
-            await explorer.show();
-          }
-        },
-      });
-    },
-
-    split: () => actions['split:intelligent'](),
-    'split:plain': async () => {
-      const quitNotifier = await explorer.tryQuitOnOpenNotifier();
-      const escapePath = await getEscapePath();
-      nvim.pauseNotification();
-      nvim.command(`split ${escapePath}`, true);
-      jumpToNotify();
-      quitNotifier.notify();
-      await nvim.resumeNotification();
-    },
-
-    'split:intelligent': async () => {
-      const position = await explorer.args.value(argOptions.position);
-      if (position === 'floating') {
-        await actions['split:plain']();
-        return;
-      } else if (position === 'tab') {
-        await actions.vsplit();
-        return;
-      }
-      await splitIntelligent(position, 'split', 'split:plain');
-    },
-
-    vsplit: () => actions['vsplit:intelligent'](),
-    'vsplit:plain': async () => {
-      const quitNotifier = await explorer.tryQuitOnOpenNotifier();
-      const escapePath = await getEscapePath();
-      nvim.pauseNotification();
-      nvim.command(`vsplit ${escapePath}`, true);
-      jumpToNotify();
-      quitNotifier.notify();
-      await nvim.resumeNotification();
-    },
-
-    'vsplit:intelligent': async () => {
-      const position = await explorer.args.value(argOptions.position);
-      if (position === 'floating') {
-        await actions['vsplit:plain']();
-        return;
-      } else if (position === 'tab') {
-        await actions['vsplit:plain']();
-        return;
-      }
-      await splitIntelligent(position, 'vsplit', 'vsplit:plain');
-    },
-
-    tab: async () => {
-      await explorer.tryQuitOnOpen();
-      nvim.pauseNotification();
-      nvim.command(`tabedit ${await getEscapePath()}`, true);
-      jumpToNotify();
-      await nvim.resumeNotification();
-    },
-
-    previousBuffer: async () => {
-      const prevWinnr = await explorer.explorerManager.prevWinnrByPrevBufnr();
-      if (prevWinnr) {
-        await openByWinnr(prevWinnr);
-      } else {
-        await actions.vsplit();
-      }
-    },
-
-    previousWindow: async () => {
-      const prevWinnr = await explorer.explorerManager.prevWinnrByPrevWindowID();
-      if (prevWinnr) {
-        await openByWinnr(prevWinnr);
-      } else {
-        await actions.vsplit();
-      }
-    },
-
-    sourceWindow: async () => {
-      const srcWinnr = await explorer.sourceWinnr();
-      if (srcWinnr) {
-        await openByWinnr(srcWinnr);
-      } else {
-        await actions.vsplit();
-      }
-    },
-  };
-
-  let openStrategy = await explorer.args.value(argOptions.openActionStrategy);
-  if (args.length) {
-    openStrategy = args.join(':') as OpenStrategy;
   }
-  if (!(openStrategy in actions)) {
+
+  async split() {
+    await this['split.intelligent']();
+  }
+
+  async 'split.plain'() {
+    const ctx = this.ctx;
+    const openNotifier = await ctx.openFilepathNotifier('split');
+    await ctx.openWrap(() => {
+      openNotifier.notify();
+    });
+  }
+
+  async 'split.intelligent'() {
+    const ctx = this.ctx;
+    if (ctx.explorerPosition.name === 'floating') {
+      await this['split.plain']();
+      return;
+    } else if (ctx.explorerPosition.name === 'tab') {
+      await this.vsplit();
+      return;
+    }
+    await this.splitIntelligent('split', 'split.plain');
+  }
+
+  async vsplit() {
+    await this['vsplit.intelligent']();
+  }
+  async 'vsplit.plain'() {
+    const ctx = this.ctx;
+    const openNotifier = await ctx.openFilepathNotifier('vsplit');
+    await ctx.openWrap(() => {
+      openNotifier.notify();
+    });
+  }
+
+  async 'vsplit.intelligent'() {
+    const ctx = this.ctx;
+    if (ctx.explorerPosition.name === 'floating') {
+      await this['vsplit.plain']();
+      return;
+    } else if (ctx.explorerPosition.name === 'tab') {
+      await this['vsplit.plain']();
+      return;
+    }
+    await this.splitIntelligent('vsplit', 'vsplit.plain');
+  }
+
+  async tab() {
+    const ctx = this.ctx;
+    const openNotifier = await ctx.openFilepathNotifier('tabedit');
+    await ctx.openWrap(
+      () => {
+        openNotifier.notify();
+      },
+      { earlyQuit: true },
+    );
+  }
+
+  async previousBuffer() {
+    const ctx = this.ctx;
+    const prevWinnr = await ctx.explorer.explorerManager.prevWinnrByPrevBufnr();
+    if (prevWinnr) {
+      await ctx.openByWinnr(prevWinnr);
+    } else {
+      await this.vsplit();
+    }
+  }
+
+  async previousWindow() {
+    const ctx = this.ctx;
+    const prevWinnr =
+      await ctx.explorer.explorerManager.prevWinnrByPrevWindowID();
+    if (prevWinnr) {
+      await ctx.openByWinnr(prevWinnr);
+    } else {
+      await this.vsplit();
+    }
+  }
+
+  async sourceWindow() {
+    const ctx = this.ctx;
+    const srcWinnr = await ctx.explorer.sourceWinnr();
+    if (srcWinnr) {
+      await ctx.openByWinnr(srcWinnr);
+    } else {
+      await this.vsplit();
+    }
+  }
+}
+
+export async function openAction(
+  explorer: Explorer,
+  source: ExplorerSource<any>,
+  node: BaseTreeNode<any>,
+  getFullpath: () => string | Promise<string>,
+  {
+    openByWinnr,
+    openStrategy,
+    cursorPosition,
+  }: {
+    openByWinnr?: (winnr: number) => void | Promise<void>;
+    openStrategy?: OpenStrategy;
+    cursorPosition?: OpenCursorPosition;
+  },
+) {
+  if (node.expandable) {
+    return;
+  }
+
+  let explorerWinid: number | undefined;
+  let quitOnOpenNotifier: () => Notifier | Promise<Notifier>;
+  if (cursorPosition === 'keep') {
+    explorerWinid = await explorer.winid;
+    quitOnOpenNotifier = () => Notifier.noop();
+  } else {
+    quitOnOpenNotifier = () => explorer.tryQuitOnOpenNotifier();
+  }
+
+  const context = new OpenActionContext(
+    explorer,
+    source,
+    cursorPosition,
+    openByWinnr,
+    getFullpath,
+    quitOnOpenNotifier,
+    explorerWinid,
+  );
+
+  const actions = new OpenActions(context);
+
+  if (!openStrategy) {
+    openStrategy = await explorer.args.value(argOptions.openActionStrategy);
+  }
+  if (!hasOwnProperty(actions, openStrategy)) {
     new Error(`openStrategy(${openStrategy}) is not supported`);
   }
   await actions[openStrategy]();

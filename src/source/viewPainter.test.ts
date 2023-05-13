@@ -1,17 +1,10 @@
-import { jestHelper } from 'coc-helper/JestHelper';
-import { registerRuntimepath } from '../util';
 import { ViewSource } from '../view/viewSource';
-import { bootSource } from '../__test__/helpers/helper';
+import { bootSource, mockWorkspace } from '../__test__/helpers/helper';
 import { ColumnRegistrar } from './columnRegistrar';
 import { BaseTreeNode, ExplorerSource } from './source';
-import { SourcePainters } from './sourcePainters';
 import { ViewRowPainter } from './viewPainter';
 
-jestHelper.boot();
-
-beforeAll(async () => {
-  await registerRuntimepath(process.cwd());
-});
+mockWorkspace();
 
 interface TestNode extends BaseTreeNode<TestNode, 'root' | 'child'> {
   name: string;
@@ -24,7 +17,7 @@ class TestColumnRegistrar extends ColumnRegistrar<TestNode, any> {}
 const testColumnRegistrar = new TestColumnRegistrar();
 
 class TestSource extends ExplorerSource<TestNode> {
-  view: ViewSource<TestNode> = new ViewSource(this, {
+  view: ViewSource<TestNode> = new ViewSource(this, testColumnRegistrar, {
     type: 'root',
     uid: '',
     level: 0,
@@ -32,11 +25,6 @@ class TestSource extends ExplorerSource<TestNode> {
     name: '',
     fullpath: '',
   });
-
-  sourcePainters: SourcePainters<TestNode> = new SourcePainters(
-    this,
-    testColumnRegistrar,
-  );
 
   async init() {}
 
@@ -115,7 +103,7 @@ testColumnRegistrar.registerColumn('child', 'link', () => ({
             grow: 'right',
           },
           () => {
-            row.add('→ ' + node.fullpath);
+            row.add(`→ ${node.fullpath}`);
             row.add(' ');
           },
         );
@@ -138,17 +126,15 @@ async function drawColumn(names: string[], width: number) {
     fullpath: '/path/to/file',
     directory: true,
   };
-  await source.sourcePainters.parseTemplate(
-    'child',
-    names.map((n) => `[${n}]`).join(''),
-  );
+  await source.view.parseTemplate('child', names.map((n) => `[${n}]`).join(''));
   return (
-    (await source.sourcePainters.beforeDraw([node], {
+    (await source.view.sourcePainters.drawPre([node], {
       async draw() {
-        const viewPainter = source.sourcePainters.viewPainter;
+        const viewPainter = source.view.sourcePainters.viewPainter;
         const row = new ViewRowPainter(viewPainter);
         row.add('||');
-        for (const part of source.sourcePainters.getPainter('child').parts) {
+        for (const part of source.view.sourcePainters.getPainter('child')
+          .parts) {
           await row.addTemplatePart(node, 1, part);
         }
         const r = await row.draw();

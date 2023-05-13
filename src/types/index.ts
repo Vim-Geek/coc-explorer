@@ -1,4 +1,9 @@
-import { Explorer, PreviewActionStrategy } from './pkg-config';
+import type {
+  Explorer,
+  PreviewActionStrategy,
+  RootStrategy,
+} from './pkg-config';
+import type { LiteralUnion } from 'type-fest';
 
 export const textobjTargetList = ['line', 'indent'] as const;
 
@@ -7,10 +12,6 @@ export type TextobjTarget = typeof textobjTargetList[number];
 export const textobjTypeList = ['i', 'a'] as const;
 
 export type textobjTarget = typeof textobjTypeList[number];
-
-export const selectTargetList = ['node', 'sibling', 'child'] as const;
-
-export type SelectTarget = typeof selectTargetList[number];
 
 export const moveStrategyList = ['default', 'insideSource'] as const;
 
@@ -33,16 +34,27 @@ export type OpenStrategy = NonNullable<
 export const openStrategyList: OpenStrategy[] = [
   'select',
   'split',
-  'split:plain',
-  'split:intelligent',
+  'split.plain',
+  'split.intelligent',
   'vsplit',
-  'vsplit:plain',
-  'vsplit:intelligent',
+  'vsplit.plain',
+  'vsplit.intelligent',
   'tab',
   'previousBuffer',
   'previousWindow',
   'sourceWindow',
 ];
+
+/**
+ * `keep string` - Keep cursor in explorer when open
+ * `position object` - Open cursor in special position
+ */
+export type OpenCursorPosition =
+  | {
+      lineIndex: number;
+      columnIndex?: number;
+    }
+  | 'keep';
 
 export const copyOrCutFileTypeList = ['toggle', 'append', 'replace'] as const;
 
@@ -60,6 +72,20 @@ export const previewStrategyList: PreviewActionStrategy[] = [
   'labeling',
   'content',
 ];
+
+export const rootStrategyList: RootStrategy[] = [
+  'keep',
+  'workspace',
+  'cwd',
+  'sourceBuffer',
+  'reveal',
+];
+
+export type RootStrategyStr = LiteralUnion<RootStrategy, string>;
+
+export const searchOptionList = ['recursive', 'noIgnore', 'strict'] as const;
+
+export type SearchOption = typeof searchOptionList[number];
 
 export const expandOptionList = [
   'recursive',
@@ -111,3 +137,5 @@ export type FloatingCreateOptions = {
 export type FloatingOpenOptions = {
   filepath?: string;
 } & ExplorerOpenOptions;
+
+export type IconSourceType = NonNullable<Explorer['explorer.icon.source']>;

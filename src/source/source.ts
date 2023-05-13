@@ -1,23 +1,13 @@
 import { HelperEventEmitter, Notifier } from 'coc-helper';
-import {
-  Disposable,
-  Emitter,
-  events,
-  ExtensionContext,
-  IList,
-  listManager,
-  workspace,
-} from 'coc.nvim';
-import { Class } from 'type-fest';
-import { Location } from 'vscode-languageserver-protocol';
+import { Disposable, ExtensionContext, Location, workspace } from 'coc.nvim';
+import type { Class } from 'type-fest';
 import { ActionSource } from '../actions/actionSource';
-import { argOptions } from '../arg/argOptions';
-import { Explorer } from '../explorer';
+import type { Explorer } from '../explorer';
 import { HighlightSource } from '../highlight/highlightSource';
 import { LocatorSource } from '../locator/locatorSource';
-import { delay, generateUri, onError } from '../util';
-import { ViewSource } from '../view/viewSource';
-import { SourcePainters } from './sourcePainters';
+import { generateUri, logger } from '../util';
+import type { RendererSource } from '../view/rendererSource';
+import type { ViewSource } from '../view/viewSource';
 
 export namespace SourceOptions {
   export interface Force {
@@ -67,11 +57,6 @@ export namespace SourceOptions {
      * @default true
      */
     render?: boolean;
-    /**
-     * Load children
-     * @default true
-     */
-    load?: boolean;
   };
 
   export type Render<TreeNode extends BaseTreeNode<any>> = {
@@ -122,11 +107,12 @@ export type NodeUid = string;
 
 export interface BaseTreeNode<
   TreeNode extends BaseTreeNode<TreeNode>,
-  Type extends string = string
+  Type extends string = string,
 > {
   type: Type;
   isRoot?: boolean;
   uid: NodeUid;
+  name: string;
   fullpath?: string;
   location?: Location;
   level?: number;
@@ -135,7 +121,8 @@ export interface BaseTreeNode<
   children?: TreeNode[];
   prevSiblingNode?: TreeNode;
   nextSiblingNode?: TreeNode;
-  compacted?: boolean;
+  compactedNodes?: TreeNode[];
+  compactedLastNode?: TreeNode;
 }
 
 export type ExplorerSourceClass = Class<ExplorerSource<any>> & {
@@ -143,24 +130,26 @@ export type ExplorerSourceClass = Class<ExplorerSource<any>> & {
 };
 
 export abstract class ExplorerSource<TreeNode extends BaseTreeNode<TreeNode>>
-  implements Disposable {
-  abstract sourcePainters: SourcePainters<TreeNode>;
+  implements Disposable
+{
   abstract view: ViewSource<TreeNode>;
-  width: number = 0;
-  showHidden: boolean = false;
+  width = 0;
+  showHidden = false;
   selectedNodes: Set<TreeNode> = new Set();
   nvim = workspace.nvim;
   context: ExtensionContext;
   bufManager = this.explorer.explorerManager.bufManager;
   events = new HelperEventEmitter<{
     loaded: (node: TreeNode) => void | Promise<void>;
-  }>(onError);
+    drawn: () => void | Promise<void>;
+  }>(logger);
   action = new ActionSource<this, TreeNode>(this, this.explorer.action);
   highlight: HighlightSource;
   locator = new LocatorSource(this);
 
-  private isDisposed: boolean = false;
   protected disposables: Disposable[] = [];
+
+  private isDisposed = false;
 
   get root() {
     return workspace.cwd;
@@ -189,6 +178,15 @@ export abstract class ExplorerSource<TreeNode extends BaseTreeNode<TreeNode>>
     get hidden() {
       return source.config.get<string>('icon.hidden')!;
     },
+    get link() {
+      return source.config.get<string>('icon.link')!;
+    },
+    get readonly() {
+      return (
+        source.config.get<string>('icon.readonly') ||
+        (source.config.get('icon.enableNerdfont') ? '' : 'RO')
+      );
+    },
   }))(this);
 
   helper = ((source) => ({
@@ -205,13 +203,14 @@ export abstract class ExplorerSource<TreeNode extends BaseTreeNode<TreeNode>>
     this.context = this.explorer.context;
     this.highlight = new HighlightSource(
       this,
-      workspace.createNameSpace(`coc-explorer-${sourceType}`),
+      // workspace.createNameSpace(`coc-explorer-${sourceType}`),
+      `coc-explorer-${sourceType}`,
     );
   }
 
   dispose() {
     this.isDisposed = true;
-    this.sourcePainters.dispose();
+    this.view.dispose();
     this.disposables.forEach((s) => s.dispose());
   }
 
@@ -219,10 +218,10 @@ export abstract class ExplorerSource<TreeNode extends BaseTreeNode<TreeNode>>
     return this.view.flattenedNodes.length;
   }
 
-  bootInit(rootExpanded: boolean) {
-    Promise.resolve(this.init()).catch(onError);
+  bootInit(rootExpandedForOpen: boolean) {
+    Promise.resolve(this.init()).catch(logger.error);
 
-    this.view.bootInit(rootExpanded);
+    this.view.bootInit(rootExpandedForOpen);
   }
 
   abstract init(): Promise<void>;
@@ -234,64 +233,16 @@ export abstract class ExplorerSource<TreeNode extends BaseTreeNode<TreeNode>>
 
   protected abstract open(isFirst: boolean): Promise<void>;
 
-  async openedNotifier(_isFirst: boolean): Promise<Notifier> {
+  async openedNotifier(
+    renderer: RendererSource<TreeNode>,
+    _isFirst: boolean,
+  ): Promise<Notifier> {
     return Notifier.noop();
   }
 
   async copyToClipboard(content: string) {
     await this.nvim.call('setreg', ['+', content]);
     await this.nvim.call('setreg', ['"', content]);
-  }
-
-  async startCocList(list: IList) {
-    const isFloating =
-      (await this.explorer.args.value(argOptions.position)) === 'floating';
-    const floatingHideOnCocList = this.config.get(
-      'floating.hideOnCocList',
-      true,
-    );
-
-    let isShown = true;
-    if (isFloating && floatingHideOnCocList) {
-      await this.explorer.hide();
-      isShown = false;
-    }
-
-    const shownExplorerEmitter = new Emitter<void>();
-    const listDisposable = listManager.registerList(list);
-    await listManager.start([list.name]);
-    listDisposable.dispose();
-
-    const eventDisposable = events.on('BufWinLeave', async () => {
-      if (
-        listManager.ui &&
-        listManager.ui.shown &&
-        listManager.ui.window?.id !== undefined
-      ) {
-        return;
-      }
-
-      eventDisposable.dispose();
-
-      if (isFloating && !isShown) {
-        await delay(200);
-        await this.explorer.show();
-        shownExplorerEmitter.fire();
-      }
-    });
-    return {
-      waitShow() {
-        if (isShown) {
-          return;
-        }
-        return new Promise((resolve) => {
-          shownExplorerEmitter.event(() => {
-            isShown = true;
-            resolve(undefined);
-          });
-        });
-      },
-    };
   }
 
   isSelectedAny() {
@@ -330,15 +281,15 @@ export abstract class ExplorerSource<TreeNode extends BaseTreeNode<TreeNode>>
     return children;
   }
 
-  async load(
-    parentNode: TreeNode,
-    options?: { render?: boolean; force?: boolean },
-  ) {
-    return (await this.loadNotifier(parentNode, options)).run();
+  async load(node: TreeNode, options?: { render?: boolean; force?: boolean }) {
+    await this.view.sync(async (r) => {
+      return (await this.loadNotifier(r, node, options)).run();
+    });
   }
 
   async loadNotifier(
-    parentNode: TreeNode,
+    renderer: RendererSource<TreeNode>,
+    node: TreeNode,
     { render = true, force = false } = {},
   ) {
     if (this.isDisposed) {
@@ -346,16 +297,18 @@ export abstract class ExplorerSource<TreeNode extends BaseTreeNode<TreeNode>>
     }
     await this.explorer.refreshWidth();
     this.selectedNodes = new Set();
-    if (this.view.isExpanded(parentNode)) {
-      parentNode.children = await this.loadInitedChildren(parentNode, {
+    if (this.view.isExpanded(node)) {
+      node.children = await this.loadInitedChildren(node, {
         recursiveExpanded: true,
         force,
       });
+    } else {
+      node.children = undefined;
     }
-    await this.events.fire('loaded', parentNode);
-    await this.sourcePainters.load(parentNode);
+    await this.events.fire('loaded', node);
+    await this.view.load(node);
     if (render) {
-      return this.view.renderNotifier({ node: parentNode, force });
+      return renderer.renderNotifier({ node, force });
     }
     return Notifier.noop();
   }

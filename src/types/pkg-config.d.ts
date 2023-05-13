@@ -5,6 +5,7 @@
  * and run json-schema-to-typescript to regenerate this file.
  */
 
+export type Position = 'left' | 'right' | 'tab' | 'floating';
 export type MappingActionExp = MappingAction | MappingActionExp[];
 export type MappingAction =
   | string
@@ -17,6 +18,7 @@ export type MappingAction =
  * Strategy for preview action
  */
 export type PreviewActionStrategy = 'labeling' | 'content';
+export type RootStrategy = 'keep' | 'workspace' | 'cwd' | 'sourceBuffer' | 'reveal';
 
 export interface Explorer {
   /**
@@ -39,11 +41,11 @@ export interface Explorer {
       'open-action-strategy'?:
         | 'select'
         | 'split'
-        | 'split:plain'
-        | 'split:intelligent'
+        | 'split.plain'
+        | 'split.intelligent'
         | 'vsplit'
-        | 'vsplit:plain'
-        | 'vsplit:intelligent'
+        | 'vsplit.plain'
+        | 'vsplit.intelligent'
         | 'tab'
         | 'previousBuffer'
         | 'previousWindow'
@@ -70,7 +72,7 @@ export interface Explorer {
       /**
        * Explorer position
        */
-      position?: 'left' | 'right' | 'tab' | 'floating';
+      position?: Position | [Position] | [Position, string];
       /**
        * Width of explorer window for open in left or right side
        */
@@ -131,6 +133,10 @@ export interface Explorer {
     };
   };
   /**
+   * Mouse mode
+   */
+  'explorer.mouseMode'?: 'none' | 'singleclick' | 'doubleclick';
+  /**
    * Keymapping mode
    */
   'explorer.keyMappingMode'?: 'none' | 'default';
@@ -165,7 +171,7 @@ export interface Explorer {
   /**
    * Explorer position
    */
-  'explorer.position'?: 'left' | 'right' | 'tab' | 'floating';
+  'explorer.position'?: Position | [Position] | [Position, string];
   /**
    * Width of explorer window for open in left or right side
    */
@@ -217,10 +223,6 @@ export interface Explorer {
    */
   'explorer.autoCollapseOptions'?: 'recursive'[];
   /**
-   * Render explorer when after open or save buffer
-   */
-  'explorer.activeMode'?: boolean;
-  /**
    * quit explorer when open action
    */
   'explorer.quitOnOpen'?: boolean;
@@ -229,16 +231,20 @@ export interface Explorer {
    */
   'explorer.previewAction.onHover'?: false | PreviewActionStrategy | [PreviewActionStrategy, number];
   /**
+   * Preview content maximum height
+   */
+  'explorer.previewAction.content.maxHeight'?: number;
+  /**
    * Strategy for open action
    */
   'explorer.openAction.strategy'?:
     | 'select'
     | 'split'
-    | 'split:plain'
-    | 'split:intelligent'
+    | 'split.plain'
+    | 'split.intelligent'
     | 'vsplit'
-    | 'vsplit:plain'
-    | 'vsplit:intelligent'
+    | 'vsplit.plain'
+    | 'vsplit.intelligent'
     | 'tab'
     | 'previousBuffer'
     | 'previousWindow'
@@ -246,12 +252,12 @@ export interface Explorer {
   /**
    * Filter windows for select strategy
    */
-  'explorer.openAction.select.filter'?: OpenActionSelectFilter & {
+  'explorer.openAction.select.filter'?: BufferFilter & {
     /**
      * Filter windows for select strategy in source
      */
     sources?: {
-      [k: string]: OpenActionSelectFilter;
+      [k: string]: BufferFilter;
     };
     [k: string]: unknown;
   };
@@ -263,6 +269,17 @@ export interface Explorer {
    * Use relative path when open a file with openAction
    */
   'explorer.openAction.relativePath'?: boolean;
+  /**
+   * The expand stores of sources
+   */
+  'explorer.expandStores'?:
+    | boolean
+    | {
+        includes: string[];
+      }
+    | {
+        excludes: string[];
+      };
   /**
    * Explorer sources
    */
@@ -278,6 +295,23 @@ export interface Explorer {
     [k: string]: unknown;
   }[];
   /**
+   * Strategies for root uri
+   */
+  'explorer.root.strategies'?: (RootStrategy | string)[];
+  /**
+   * Patterns for root uri
+   */
+  'explorer.root.customRules'?: {
+    [k: string]: {
+      patterns: string[];
+      /**
+       * Search outward from the current buffer, default is false
+       */
+      bottomUp?: boolean;
+      [k: string]: unknown;
+    };
+  };
+  /**
    * Enable integrated with coc-floatinput
    */
   'explorer.enableFloatinput'?: boolean;
@@ -285,6 +319,10 @@ export interface Explorer {
    * Enable nerdfont
    */
   'explorer.icon.enableNerdfont'?: boolean;
+  /**
+   * The source or file type icon and color
+   */
+  'explorer.icon.source'?: 'builtin' | 'vim-devicons' | 'nvim-web-devicons' | 'nerdfont.vim';
   /**
    * Custom icons and color highlights
    */
@@ -294,15 +332,20 @@ export interface Explorer {
      */
     icons?: {
       /**
-       * Group icon
+       * Icon for an extension group
        */
-      code: string;
-      /**
-       * Group icon color
-       */
-      color: string;
-      [k: string]: unknown;
-    }[];
+      [k: string]: {
+        /**
+         * Group icon
+         */
+        code: string;
+        /**
+         * Group icon color
+         */
+        color: string;
+        [k: string]: unknown;
+      };
+    };
     /**
      * File extension to icon group
      */
@@ -356,6 +399,14 @@ export interface Explorer {
    */
   'explorer.icon.hidden'?: string;
   /**
+   * Icon for soft link
+   */
+  'explorer.icon.link'?: string;
+  /**
+   * Icon for readonly
+   */
+  'explorer.icon.readonly'?: string;
+  /**
    * Template for root node of bookmark source
    */
   'explorer.bookmark.root.template'?: string;
@@ -392,9 +443,35 @@ export interface Explorer {
    */
   'explorer.datetime.format'?: string;
   /**
+   * Explorer will automatically reveal to the current buffer when open explorer
+   */
+  'explorer.file.revealWhenOpen'?: boolean;
+  /**
    * Explorer will automatically expand to the current buffer
    */
   'explorer.file.autoReveal'?: boolean;
+  /**
+   * Explorer will automatically reveal to the current buffer when open explorer
+   */
+  'explorer.file.reveal.whenOpen'?: boolean;
+  /**
+   * Explorer will automatically reveal to the current buffer when enter a buffer
+   */
+  'explorer.file.reveal.auto'?: boolean;
+  /**
+   * Exlorer will not automatically reveal to these buffers
+   */
+  'explorer.file.reveal.filter'?: {
+    /**
+     * Filter buffer by RegExp
+     */
+    patterns?: string[];
+    /**
+     * Filter buffer by literal string
+     */
+    literals?: string[];
+    [k: string]: unknown;
+  };
   /**
    * Custom hidden rules for file
    */
@@ -430,6 +507,10 @@ export interface Explorer {
   /**
    * Whether the file has been copied
    */
+  'explorer.file.column.link.copy'?: string;
+  /**
+   * Whether the file has been copied
+   */
   'explorer.file.column.clip.copy'?: string;
   /**
    * Whether the file has been cut
@@ -444,9 +525,9 @@ export interface Explorer {
    */
   'explorer.file.column.indent.indentLine'?: boolean;
   /**
-   * Change tab directory when performing the cd action
+   * Change directory when performing the cd action
    */
-  'explorer.file.tabCD'?: boolean;
+  'explorer.file.cdCommand'?: false | 'cd' | 'tcd';
   /**
    * Enable colored filenames based on status
    */
@@ -571,7 +652,7 @@ export interface Explorer {
 /**
  * Filter windows option for select strategy
  */
-export interface OpenActionSelectFilter {
+export interface BufferFilter {
   buftypes?: string[];
   filetypes?: string[];
   floatingWindows?: boolean;

@@ -1,5 +1,6 @@
-import { BasicList, Neovim, workspace, Mru } from 'coc.nvim';
-import { onError } from '../util';
+import { workspace } from 'coc.nvim';
+import { logger } from '../util';
+import { registerList } from './runner';
 
 interface ActionData {
   name: string;
@@ -14,33 +15,14 @@ function score(list: string[], key: string): number {
   return idx === -1 ? -1 : list.length - idx;
 }
 
-export const actionListMru = new Mru('explorer-actions');
+export const actionListMru = workspace.createMru('explorer-actions');
 
-export class ExplorerActionList extends BasicList {
-  readonly defaultAction = 'do';
-  readonly name = 'explorerActions';
-  private explorerActions: ActionData[] = [];
-
-  constructor(nvim: Neovim) {
-    super(nvim);
-
-    this.addAction('do', (item) => {
-      new Promise(async (resolve) => {
-        const data = item.data as ActionData;
-        await data.callback();
-        await actionListMru.add(data.name);
-        resolve(undefined);
-      }).catch(onError);
-    });
-  }
-
-  setExplorerActions(actions: ActionData[]) {
-    this.explorerActions = actions;
-  }
-
-  async loadItems() {
+export const explorerActionList = registerList<ActionData[], ActionData>({
+  name: 'explorerActionList',
+  defaultAction: 'do',
+  async loadItems(actions) {
     const mruList = await actionListMru.load();
-    const items = this.explorerActions.map((actionData) => ({
+    const items = actions.map((actionData) => ({
       label: `${actionData.name} [${actionData.key || ''}] ${
         actionData.description
       }`,
@@ -51,10 +33,9 @@ export class ExplorerActionList extends BasicList {
     }));
     items.sort((a, b) => b.data.score - a.data.score);
     return items;
-  }
-
+  },
   doHighlight() {
-    const { nvim } = this;
+    const { nvim } = workspace;
     nvim.pauseNotification();
     nvim.command(
       'syntax match CocExplorerActionName /\\v^[a-zA-Z0-9:|<>]+/',
@@ -74,8 +55,15 @@ export class ExplorerActionList extends BasicList {
       'highlight default link CocExplorerActionDescription Comment',
       true,
     );
-    nvim.resumeNotification().catch(onError);
-  }
-}
-
-export const explorerActionList = new ExplorerActionList(workspace.nvim);
+    nvim.resumeNotification().catch(logger.error);
+  },
+  init() {
+    this.addAction('do', ({ item }) => {
+      logger.asyncCatch(async () => {
+        const data = item.data;
+        await data.callback();
+        await actionListMru.add(data.name);
+      })();
+    });
+  },
+});

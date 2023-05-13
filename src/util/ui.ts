@@ -1,16 +1,16 @@
 import type { FloatInputType } from 'coc-floatinput';
-import { extensions, workspace } from 'coc.nvim';
+import { extensions, Extension, workspace } from 'coc.nvim';
 import { config, ExplorerConfig } from '../config';
 
-let floatInputApi: FloatInputType | undefined;
+let floatInputExt: Extension<FloatInputType> | undefined;
 
 async function getFloatInputApi() {
-  if (!floatInputApi) {
-    floatInputApi = extensions.getExtensionApi(
-      'coc-floatinput',
-    ) as FloatInputType;
+  if (!floatInputExt) {
+    floatInputExt = extensions.all.find((e) => e.id === 'coc-floatinput') as
+      | Extension<FloatInputType>
+      | undefined;
   }
-  return floatInputApi;
+  return floatInputExt?.exports;
 }
 
 async function getFloatUI() {
@@ -44,19 +44,14 @@ export async function vimPrompt(
         if (index === -1) {
           index = 0;
         }
-        return (
-          choice.slice(0, index) +
-          '&' +
-          choice[index].toUpperCase() +
-          choice.slice(index + 1)
-        );
+        return `${choice.slice(0, index)}&${choice[
+          index
+        ].toUpperCase()}${choice.slice(index + 1)}`;
       })
       .join('\n'),
     defaultNumber + 1,
   ])) as number;
-  if (result === 0) {
-    return;
-  } else {
+  if (result !== 0) {
     return choices[result - 1];
   }
 }
@@ -129,8 +124,8 @@ export async function vimInput(
 ): Promise<string> {
   return workspace.nvim.callAsync('coc#util#with_callback', [
     'input',
-    [prompt + ' ', defaultInput, completion],
-  ]);
+    [`${prompt} `, defaultInput, completion],
+  ]) as Promise<string>;
 }
 
 export async function input(

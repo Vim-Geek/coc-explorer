@@ -1,16 +1,17 @@
 import { explorerActionList } from '../lists/actions';
+import { startCocList } from '../lists/runner';
 import { keyMapping } from '../mappings';
-import { BaseTreeNode, ExplorerSource } from '../source/source';
-import { flatten, onError, partition } from '../util';
-import { ActionExplorer } from './actionExplorer';
+import type { BaseTreeNode, ExplorerSource } from '../source/source';
+import { flatten, logger, partition, uniq } from '../util';
+import type { ActionExplorer } from './actionExplorer';
 import { ActionMenu } from './menu';
 import { ActionRegistrar } from './registrar';
-import { conditionActionRules, waitAction } from './special';
-import { ActionExp, MappingMode } from './types';
+import { conditionActionRules, noopAction, waitAction } from './special';
+import type { ActionExp, MappingMode } from './types';
 
 export class ActionSource<
   S extends ExplorerSource<any>,
-  TreeNode extends BaseTreeNode<TreeNode>
+  TreeNode extends BaseTreeNode<TreeNode>,
 > extends ActionRegistrar<S, TreeNode> {
   public readonly global: ActionExplorer;
   public readonly source = this.owner;
@@ -20,15 +21,21 @@ export class ActionSource<
     this.global = globalActionRegistrar;
   }
 
-  registeredActions(): ActionRegistrar.Map<TreeNode> {
-    return {
-      ...((this.global.actions as unknown) as ActionRegistrar.Map<TreeNode>),
-      ...this.actions,
-    };
+  registeredActions(): ActionRegistrar.ActionMap<BaseTreeNode<any>> {
+    return new Map([
+      ...this.global.actions,
+      ...(this.actions as ActionRegistrar.ActionMap<any>),
+    ]);
   }
 
-  registeredAction(name: string): ActionRegistrar.Action<TreeNode> | undefined {
-    return this.actions[name] || this.global.actions[name];
+  registeredAction(
+    name: string,
+  ): ActionRegistrar.Action<BaseTreeNode<any>> | undefined {
+    return (
+      (this.actions.get(name) as
+        | ActionRegistrar.Action<BaseTreeNode<any>>
+        | undefined) || this.global.actions.get(name)
+    );
   }
 
   async doActionExp(
@@ -47,33 +54,51 @@ export class ActionSource<
   ) {
     const mode = options.mode ?? 'n';
     const isSubAction = options.isSubAction ?? false;
-    let release: undefined | (() => void);
+    let waitRelease: undefined | (() => void);
+    let curNodes = nodes;
 
     const subOptions = {
-      mode: mode,
+      mode,
       isSubAction: true,
     };
     try {
       if (Array.isArray(actionExp)) {
         for (let i = 0; i < actionExp.length; i++) {
+          if (i !== 0) {
+            curNodes = [this.source.view.currentNode()];
+          }
+
           const action = actionExp[i];
 
+          // nested array
           if (Array.isArray(action)) {
-            await this.doActionExp(action, nodes, subOptions);
+            await this.doActionExp(action, curNodes, subOptions);
             continue;
           }
 
+          // wait action and timeout
           if (action.name === waitAction.name) {
-            if (release || isSubAction) {
+            const timeout = this.source.config.get(
+              'mapping.action.wait.timeout',
+            );
+            if (timeout === 0 || waitRelease || isSubAction) {
               continue;
             }
-            release = await this.global.actionMutex.acquire();
+            waitRelease = await this.global.waitActionMutex.acquire();
+            setTimeout(() => {
+              if (waitRelease) {
+                logger.warn(`action(${JSON.stringify(actionExp)}) timeout`);
+                waitRelease();
+                waitRelease = undefined;
+              }
+            }, timeout);
             continue;
           }
 
+          // condition action
           const rule = conditionActionRules[action.name];
           if (rule) {
-            const [trueNodes, falseNodes] = partition(nodes, (node) =>
+            const [trueNodes, falseNodes] = partition(curNodes, (node) =>
               rule.filter(this.source, node, action.args),
             );
             const [trueAction, falseAction] = [
@@ -88,16 +113,17 @@ export class ActionSource<
               await this.doActionExp(falseAction, falseNodes, subOptions);
             }
           } else {
-            await this.doActionExp(action, nodes, subOptions);
+            await this.doActionExp(action, curNodes, subOptions);
           }
         }
       } else {
-        await this.doAction(actionExp.name, nodes, actionExp.args, mode);
+        if (actionExp.name !== noopAction.name) {
+          await this.doAction(actionExp.name, curNodes, actionExp.args, mode);
+        }
       }
-    } catch (error) {
-      throw error;
     } finally {
-      release?.();
+      waitRelease?.();
+      waitRelease = undefined;
     }
   }
 
@@ -116,44 +142,46 @@ export class ActionSource<
 
     const finalNodes = Array.isArray(nodes) ? nodes : [nodes];
     const source = this.source;
-    if (select === true) {
-      const allNodes = [...finalNodes, ...source.selectedNodes];
-      source.selectedNodes.clear();
-      source.view.requestRenderNodes(allNodes);
-      await action.callback.call(source, {
-        source,
-        nodes: allNodes,
-        args,
-        mode,
-      });
-    } else if (select === false) {
-      await action.callback.call(source, {
-        source,
-        nodes: [finalNodes[0]],
-        args,
-        mode,
-      });
-    } else if (select === 'visual') {
-      await action.callback.call(source, {
-        source,
-        nodes: finalNodes,
-        args,
-        mode,
-      });
-    } else if (select === 'keep') {
-      const allNodes = [...finalNodes, ...source.selectedNodes];
-      await action.callback.call(source, {
-        source,
-        nodes: allNodes,
-        args,
-        mode,
-      });
-    }
-
-    if (reload) {
-      await source.load(source.view.rootNode);
-    } else if (render) {
-      await source.view.render();
+    try {
+      if (select === true) {
+        const allNodes = uniq([...finalNodes, ...source.selectedNodes]);
+        source.selectedNodes.clear();
+        source.view.requestRenderNodes(allNodes);
+        await action.callback.call(source, {
+          source,
+          nodes: allNodes,
+          args,
+          mode,
+        });
+      } else if (select === false) {
+        await action.callback.call(source, {
+          source,
+          nodes: [finalNodes[0]],
+          args,
+          mode,
+        });
+      } else if (select === 'visual') {
+        await action.callback.call(source, {
+          source,
+          nodes: finalNodes,
+          args,
+          mode,
+        });
+      } else if (select === 'keep') {
+        const allNodes = uniq([...finalNodes, ...source.selectedNodes]);
+        await action.callback.call(source, {
+          source,
+          nodes: allNodes,
+          args,
+          mode,
+        });
+      }
+    } finally {
+      if (reload) {
+        await source.load(source.view.rootNode);
+      } else if (render) {
+        await source.view.render();
+      }
     }
   }
 
@@ -165,9 +193,11 @@ export class ActionSource<
       source.sourceType,
     );
 
-    explorerActionList.setExplorerActions(
+    const task = await startCocList(
+      this.source.explorer,
+      explorerActionList,
       flatten(
-        Object.entries(actions)
+        [...actions.entries()]
           .filter(([actionName]) => actionName !== 'actionMenu')
           .sort(([aName], [bName]) => aName.localeCompare(bName))
           .map(([actionName, { callback, options, description }]) => {
@@ -179,7 +209,7 @@ export class ActionSource<
                 key,
                 description,
                 callback: async () => {
-                  await task.waitShow();
+                  await task.waitExplorerShow();
                   await callback.call(source, {
                     source,
                     nodes,
@@ -192,15 +222,15 @@ export class ActionSource<
             if (options.menus) {
               list.push(
                 ...ActionMenu.getNormalizeMenus(options.menus).map((menu) => {
-                  const fullActionName = actionName + ':' + menu.args;
+                  const fullActionName = `${actionName}:${menu.args}`;
                   const keys = reverseMappings[fullActionName];
                   const key = keys ? keys.vmap ?? keys.all : '';
                   return {
                     name: fullActionName,
                     key,
-                    description: description + ' ' + menu.description,
+                    description: `${description} ${menu.description}`,
                     callback: async () => {
-                      await task.waitShow();
+                      await task.waitExplorerShow();
                       await callback.call(source, {
                         source,
                         nodes,
@@ -216,7 +246,6 @@ export class ActionSource<
           }),
       ),
     );
-    const task = await source.startCocList(explorerActionList);
-    task.waitShow()?.catch(onError);
+    task.waitExplorerShow()?.catch(logger.error);
   }
 }

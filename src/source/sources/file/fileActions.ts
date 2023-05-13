@@ -1,32 +1,39 @@
-import { Notifier } from 'coc-helper';
-import { listManager, workspace } from 'coc.nvim';
 import open from 'open';
+import { Notifier } from 'coc-helper';
+import { window, workspace } from 'coc.nvim';
 import pathLib from 'path';
-import { ActionSource } from '../../../actions/actionSource';
+import type { ActionSource } from '../../../actions/actionSource';
 import { driveList } from '../../../lists/drives';
+import { startCocList } from '../../../lists/runner';
 import { explorerWorkspaceFolderList } from '../../../lists/workspaceFolders';
 import {
   CopyOrCutFileType,
   copyOrCutFileTypeList,
   RevealStrategy,
   revealStrategyList,
+  rootStrategyList,
+  SearchOption,
+  searchOptionList,
 } from '../../../types';
 import {
   bufnrByWinnrOrWinid,
+  currentBufnr,
   fsCopyFileRecursive,
   fsMkdirp,
   fsRename,
-  fsRimraf,
+  fsRemove,
   fsTouch,
   fsTrash,
   input,
+  isParentFolder,
   isWindows,
   listDrive,
+  logger,
   overwritePrompt,
   prompt,
   selectWindowsUI,
 } from '../../../util';
-import { FileNode, FileSource } from './fileSource';
+import type { FileNode, FileSource } from './fileSource';
 
 export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
   const { nvim } = workspace;
@@ -39,7 +46,7 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
         return;
       }
       const nodeUid = file.view.currentNode()?.uid;
-      if (/^[A-Za-z]:[\\\/]$/.test(file.root)) {
+      if (/^[A-Za-z]:[\\/]$/.test(file.root)) {
         file.root = '';
       } else {
         file.root = pathLib.dirname(file.root);
@@ -53,15 +60,71 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
     'change directory to parent directory',
   );
   action.addNodeAction(
+    'rootStrategies',
+    ({ args }) => {
+      const originalRootStrategies: string | undefined = args[0];
+      if (originalRootStrategies)
+        file.rootStrategies = originalRootStrategies.split(',');
+    },
+    'change root strategies',
+    {
+      args: [
+        {
+          name: 'root strategies',
+          description: `root strategies of ${rootStrategyList.join(' | ')}`,
+        },
+      ],
+      menus: {
+        'workspace,cwd,sourceBuffer,reveal': 'default',
+        keep: 'keep current root',
+      },
+    },
+  );
+  action.addNodeAction(
+    'resolveRoot',
+    async ({ args, node }) => {
+      const targetPath: string | undefined = args[0];
+      const root = await file.explorer.rooter?.resolveRoot(
+        targetPath,
+        file.rootStrategies,
+      );
+      if (root) await action.doAction('cd', node, [root]);
+    },
+    'resolve and change directory to root',
+    {
+      args: [
+        {
+          name: 'reveal path',
+          description: 'path string',
+        },
+      ],
+      menus: {
+        path: {
+          description: 'use custom path',
+          args: '<reveal-path>',
+          async actionArgs() {
+            return [
+              await input(
+                'input a reveal path:',
+                file.view.currentNode()?.fullpath ?? '',
+                'file',
+              ),
+            ];
+          },
+        },
+      },
+    },
+  );
+  action.addNodeAction(
     'reveal',
-    async ({ args }) => {
-      const target = args[0];
+    async ({ node, args }) => {
+      const target: string | undefined = args[0];
       let targetBufnr: number | undefined;
-      let targetPath: string | undefined;
+      let targetPath = '';
       if (/\d+/.test(target)) {
         targetBufnr = parseInt(target, 10);
         if (targetBufnr === 0) {
-          targetBufnr = workspace.bufnr;
+          targetBufnr = await currentBufnr();
         }
       } else {
         const revealStrategy = (target ?? 'previousWindow') as RevealStrategy;
@@ -83,7 +146,8 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
             );
           },
           previousBuffer: async () => {
-            targetBufnr = await file.explorer.explorerManager.previousBufnr.get();
+            targetBufnr =
+              await file.explorer.explorerManager.previousBufnr.get();
           },
           previousWindow: async () => {
             targetBufnr = await bufnrByWinnrOrWinid(
@@ -117,17 +181,24 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
         return;
       }
 
-      const expandOptions = args[1] ?? '';
-      const compact = expandOptions.includes('compact') || undefined;
-      const [revealNode, notifiers] = await file.revealNodeByPathNotifier(
-        targetPath,
-        {
-          compact,
-        },
-      );
-      if (revealNode) {
-        await Notifier.runAll(notifiers);
+      if (!isParentFolder(file.root, targetPath)) {
+        await action.doAction('resolveRoot', node, [targetPath]);
       }
+
+      await file.view.sync(async (r) => {
+        const expandOptions = args[1] ?? '';
+        const compact = expandOptions.includes('compact') || undefined;
+        const [revealNode, notifiers] = await file.revealNodeByPathNotifier(
+          r,
+          targetPath,
+          {
+            compact,
+          },
+        );
+        if (revealNode) {
+          await Notifier.runAll(notifiers);
+        }
+      });
     },
     'reveal buffer in explorer',
     {
@@ -198,10 +269,9 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
   action.addNodeAction(
     'workspaceFolders',
     async () => {
-      explorerWorkspaceFolderList.setFileSource(file);
-      const disposable = listManager.registerList(explorerWorkspaceFolderList);
-      await listManager.start(['--normal', explorerWorkspaceFolderList.name]);
-      disposable.dispose();
+      await startCocList(file.explorer, explorerWorkspaceFolderList, file, [
+        '--normal',
+      ]);
     },
     'change directory to current node',
   );
@@ -226,10 +296,25 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
       await file.copyToClipboard(
         nodes ? nodes.map((it) => it.fullpath).join('\n') : file.root,
       );
-      // eslint-disable-next-line no-restricted-properties
-      workspace.showMessage('Copy filepath to clipboard');
+      await window.showInformationMessage('Copy filepath to clipboard');
     },
     'copy full filepath to clipboard',
+  );
+  action.addNodesAction(
+    'copyRelativeFilepath',
+    async ({ nodes }) => {
+      await file.copyToClipboard(
+        nodes
+          ? nodes
+              .map((it) => pathLib.relative(file.root, it.fullpath))
+              .join('\n')
+          : file.root,
+      );
+      await window.showInformationMessage(
+        'Copy relative filepath to clipboard',
+      );
+    },
+    'copy relative filepath to clipboard',
   );
   action.addNodesAction(
     'copyFilename',
@@ -239,8 +324,7 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
           ? nodes.map((it) => it.name).join('\n')
           : pathLib.basename(file.root),
       );
-      // eslint-disable-next-line no-restricted-properties
-      workspace.showMessage('Copy filename to clipboard');
+      await window.showInformationMessage('Copy filename to clipboard');
     },
     'copy filename to clipboard',
   );
@@ -249,39 +333,46 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
     args: [
       {
         name: 'type',
-        description: copyOrCutFileTypeList.join(' | '),
+        description: `${copyOrCutFileTypeList.join(' | ')}, default: replace`,
       },
     ],
     menus: {
-      toggle: 'toggle',
-      append: 'append',
-      replace: 'replace',
+      toggle: 'toggle copy/cut',
+      append: 'append to copy/cut',
+      replace: 'replace copy/cut ',
     },
   };
   action.addNodesAction(
     'copyFile',
     async ({ nodes, args }) => {
-      const type = (args[0] ?? 'toggle') as CopyOrCutFileType;
+      const type = (args[0] ?? 'replace') as CopyOrCutFileType;
+      const clipboardStorage = file.explorer.explorerManager.clipboardStorage;
       if (type === 'replace') {
-        file.view.requestRenderNodes([...file.copiedNodes, ...file.cutNodes]);
-        file.copiedNodes.clear();
-        file.cutNodes.clear();
-
-        for (const node of nodes) {
-          file.copiedNodes.add(node);
-        }
+        const content = await clipboardStorage.getFiles();
+        const oldNodes = file.getNodesByPaths(content.fullpaths);
+        file.view.requestRenderNodes(oldNodes);
+        await clipboardStorage.setFiles(
+          'copy',
+          nodes.map((it) => it.fullpath),
+        );
       } else if (type === 'toggle') {
+        const content = await clipboardStorage.getFiles();
+        const fullpathSet = new Set(content.fullpaths);
         for (const node of nodes) {
-          if (file.copiedNodes.has(node)) {
-            file.copiedNodes.delete(node);
+          if (fullpathSet.has(node.fullpath)) {
+            fullpathSet.delete(node.fullpath);
           } else {
-            file.copiedNodes.add(node);
+            fullpathSet.add(node.fullpath);
           }
         }
+        await clipboardStorage.setFiles('copy', [...fullpathSet]);
       } else if (type === 'append') {
+        const content = await clipboardStorage.getFiles();
+        const fullpathSet = new Set(content.fullpaths);
         for (const node of nodes) {
-          file.copiedNodes.add(node);
+          fullpathSet.add(node.fullpath);
         }
+        await clipboardStorage.setFiles('copy', [...fullpathSet]);
       }
       file.view.requestRenderNodes(nodes);
     },
@@ -291,27 +382,35 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
   action.addNodesAction(
     'cutFile',
     async ({ nodes, args }) => {
-      const type = (args[0] ?? 'toggle') as CopyOrCutFileType;
+      const type = (args[0] ?? 'replace') as CopyOrCutFileType;
+      const clipboardStorage = file.explorer.explorerManager.clipboardStorage;
       if (type === 'replace') {
-        file.view.requestRenderNodes([...file.copiedNodes, ...file.cutNodes]);
-        file.copiedNodes.clear();
-        file.cutNodes.clear();
+        const content = await clipboardStorage.getFiles();
+        const oldNodes = file.getNodesByPaths(content.fullpaths);
+        file.view.requestRenderNodes(oldNodes);
 
-        for (const node of nodes) {
-          file.cutNodes.add(node);
-        }
+        await clipboardStorage.setFiles(
+          'cut',
+          nodes.map((it) => it.fullpath),
+        );
       } else if (type === 'toggle') {
+        const content = await clipboardStorage.getFiles();
+        const fullpathSet = new Set(content.fullpaths);
         for (const node of nodes) {
-          if (file.cutNodes.has(node)) {
-            file.cutNodes.delete(node);
+          if (fullpathSet.has(node.fullpath)) {
+            fullpathSet.delete(node.fullpath);
           } else {
-            file.cutNodes.add(node);
+            fullpathSet.add(node.fullpath);
           }
         }
+        await clipboardStorage.setFiles('cut', [...fullpathSet]);
       } else if (type === 'append') {
+        const content = await clipboardStorage.getFiles();
+        const fullpathSet = new Set(content.fullpaths);
         for (const node of nodes) {
-          file.cutNodes.add(node);
+          fullpathSet.add(node.fullpath);
         }
+        await clipboardStorage.setFiles('cut', [...fullpathSet]);
       }
       file.view.requestRenderNodes(nodes);
     },
@@ -319,40 +418,57 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
     copyOrCutFileOptions,
   );
   action.addNodeAction(
+    'clearCopyOrCut',
+    async () => {
+      const clipboardStorage = file.explorer.explorerManager.clipboardStorage;
+      const content = await clipboardStorage.getFiles();
+      await clipboardStorage.clear();
+      file.view.requestRenderNodes(file.getNodesByPaths(content.fullpaths));
+    },
+    'clear cut/copy clipboard of files',
+  );
+  action.addNodeAction(
     'pasteFile',
     async ({ node }) => {
-      if (file.copiedNodes.size <= 0 && file.cutNodes.size <= 0) {
-        // eslint-disable-next-line no-restricted-properties
-        workspace.showMessage('Copied files or cut files is empty', 'error');
+      const clipboardStorage = file.explorer.explorerManager.clipboardStorage;
+      const content = await clipboardStorage.getFiles();
+      if (content.type === 'none' || content.fullpaths.length <= 0) {
+        await window.showInformationMessage(
+          'Copied or cut files is empty',
+          'error',
+        );
         return;
       }
-      const targetDir = file.getPutTargetDir(node);
-      if (file.copiedNodes.size > 0) {
-        const nodes = [...file.copiedNodes];
-        await overwritePrompt(
+      const fullpaths = content.fullpaths;
+      const targetNode = file.getPutTargetNode(node);
+      const targetDir = targetNode.fullpath;
+      let overwriteResult: { endFullpaths: string[] } | undefined;
+      if (content.type === 'copy') {
+        overwriteResult = await overwritePrompt(
           'paste',
-          nodes.map((node) => ({
-            source: node.fullpath,
-            target: pathLib.join(targetDir, pathLib.basename(node.fullpath)),
+          fullpaths.map((fullpath) => ({
+            source: fullpath,
+            target: pathLib.join(targetDir, pathLib.basename(fullpath)),
           })),
           fsCopyFileRecursive,
         );
-        file.view.requestRenderNodes(nodes);
-        file.copiedNodes.clear();
-      }
-      if (file.cutNodes.size > 0) {
-        const nodes = [...file.cutNodes];
-        await overwritePrompt(
+      } else if (content.type === 'cut') {
+        overwriteResult = await overwritePrompt(
           'paste',
-          nodes.map((node) => ({
-            source: node.fullpath,
-            target: pathLib.join(targetDir, pathLib.basename(node.fullpath)),
+          fullpaths.map((fullpath) => ({
+            source: fullpath,
+            target: pathLib.join(targetDir, pathLib.basename(fullpath)),
           })),
           fsRename,
         );
-        file.cutNodes.clear();
+        await clipboardStorage.setFiles('cut', overwriteResult.endFullpaths);
       }
       await file.load(file.view.rootNode);
+      await file.view.sync(async (r) => {
+        await file.revealNodeByPathNotifier(r, fullpaths[0], {
+          startNode: targetNode,
+        });
+      });
     },
     'paste files to here',
   );
@@ -360,7 +476,11 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
     'delete',
     async ({ nodes }) => {
       if (
-        nodes.some((node) => file.bufManager.modified(node.fullpath)) &&
+        nodes.some((node) =>
+          file.bufManager.modified(node.fullpath, {
+            directory: node.directory,
+          }),
+        ) &&
         (await prompt('Buffer is being modified, discard it?')) !== 'yes'
       ) {
         return;
@@ -368,7 +488,7 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
 
       const list = nodes.map((node) => node.fullpath).join('\n');
       if (
-        (await prompt('Move these files or directories to trash?\n' + list)) !==
+        (await prompt(`Move these files or directories to trash?\n${list}`)) !==
         'yes'
       ) {
         return;
@@ -377,7 +497,11 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
       await fsTrash(nodes.map((node) => node.fullpath));
 
       for (const node of nodes) {
-        await file.bufManager.remove(node.fullpath, true);
+        await file.bufManager.remove(node.fullpath, {
+          skipModified: true,
+          bwipeout: true,
+          directory: node.directory,
+        });
       }
     },
     'move file or directory to trash',
@@ -387,7 +511,11 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
     'deleteForever',
     async ({ nodes }) => {
       if (
-        nodes.some((node) => file.bufManager.modified(node.fullpath)) &&
+        nodes.some((node) =>
+          file.bufManager.modified(node.fullpath, {
+            directory: node.directory,
+          }),
+        ) &&
         (await prompt('Buffer is being modified, discard it?')) !== 'yes'
       ) {
         return;
@@ -396,18 +524,22 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
       const list = nodes.map((node) => node.fullpath).join('\n');
       if (
         (await prompt(
-          'Forever delete these files or directories?\n' + list,
+          `Delete these files or directories permanently?\n${list}`,
         )) !== 'yes'
       ) {
         return;
       }
 
       for (const node of nodes) {
-        await fsRimraf(node.fullpath);
-        await file.bufManager.remove(node.fullpath, true);
+        await fsRemove(node.fullpath, undefined);
+        await file.bufManager.remove(node.fullpath, {
+          skipModified: true,
+          bwipeout: true,
+          directory: node.directory,
+        });
       }
     },
-    'delete file or directory forever',
+    'delete file or directory permanently',
     { reload: true },
   );
 
@@ -446,12 +578,18 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
           await fsTouch(target);
         },
       );
-      const loadNode = putTargetNode.parent ?? putTargetNode;
-      const reloadNotifier = await file.loadNotifier(loadNode);
-      const [, notifiers] = await file.revealNodeByPathNotifier(targetPath, {
-        startNode: loadNode,
+      await file.view.sync(async (r) => {
+        const loadNode = putTargetNode.parent ?? putTargetNode;
+        const reloadNotifier = await file.loadNotifier(r, loadNode);
+        const [, notifiers] = await file.revealNodeByPathNotifier(
+          r,
+          targetPath.replace(/(\/|\\)$/, ''),
+          {
+            startNode: loadNode,
+          },
+        );
+        await Notifier.runAll([reloadNotifier, ...notifiers]);
       });
-      await Notifier.runAll([reloadNotifier, ...notifiers]);
     },
     'add a new file',
   );
@@ -478,16 +616,18 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
           await fsMkdirp(target);
         },
       );
-      const reloadNotifier = await file.loadNotifier(
-        putTargetNode.parent ?? putTargetNode,
-      );
-      const [, revealNotifiers] = await file.revealNodeByPathNotifier(
-        targetPath,
-        {
-          startNode: putTargetNode,
-        },
-      );
-      await Notifier.runAll([reloadNotifier, ...revealNotifiers]);
+      await file.view.sync(async (r) => {
+        const revealRoot = putTargetNode.parent ?? putTargetNode;
+        const reloadNotifier = await file.loadNotifier(r, revealRoot);
+        const [, revealNotifiers] = await file.revealNodeByPathNotifier(
+          r,
+          targetPath,
+          {
+            startNode: revealRoot,
+          },
+        );
+        await Notifier.runAll([reloadNotifier, ...revealNotifiers]);
+      });
     },
     'add a new directory',
   );
@@ -495,7 +635,9 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
     'rename',
     async ({ node }) => {
       if (
-        file.bufManager.modified(node.fullpath) &&
+        file.bufManager.modified(node.fullpath, {
+          directory: node.directory,
+        }) &&
         (await prompt('Buffer is being modified, discard it?')) !== 'yes'
       ) {
         return;
@@ -525,12 +667,14 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
         fsRename,
       );
 
-      await file.bufManager.remove(node.fullpath, true);
-
-      await file.load(file.view.rootNode);
+      await file.bufManager.replace(node.fullpath, targetPath, {
+        skipModified: true,
+        bwipeout: true,
+        directory: node.directory,
+      });
     },
-
     'rename a file or directory',
+    { reload: true },
   );
 
   action.addNodesAction(
@@ -550,7 +694,9 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
       'listDrive',
       async () => {
         const drives = await listDrive();
-        driveList.setExplorerDrives(
+        await startCocList(
+          file.explorer,
+          driveList,
           drives.map((drive) => ({
             name: drive,
             callback: async (drive) => {
@@ -558,14 +704,8 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
               await file.view.expand(file.view.rootNode);
             },
           })),
+          ['--normal', '--number-select'],
         );
-        const disposable = listManager.registerList(driveList);
-        await listManager.start([
-          '--normal',
-          '--number-select',
-          driveList.name,
-        ]);
-        disposable.dispose();
       },
       'list drives',
     );
@@ -573,19 +713,46 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
 
   action.addNodeAction(
     'search',
-    async ({ node }) => {
+    async ({ node, args }) => {
+      const searchOptions = (args[0] ?? '').split('|') as SearchOption[];
+      const recursive = searchOptions.includes('recursive');
+      const strict = searchOptions.includes('strict');
+      const noIgnore = searchOptions.includes('noIgnore');
+
       await file.searchByCocList(
         node.isRoot ? node.fullpath : pathLib.dirname(node.fullpath),
-        false,
+        { recursive, noIgnore, strict },
       );
     },
-    'search by coc-list',
+    'search by coc-list, the ignore function requires the fd command',
+    {
+      args: [
+        {
+          name: 'search options',
+          description: searchOptionList.join(' | '),
+        },
+      ],
+      menus: {
+        noIgnore: 'no ignore',
+        recursive: 'recursively',
+        'recursive|noIgnore': 'recursively and no ignore',
+        strict: 'exact match',
+        'recursive|strict': 'recursively and strict',
+      },
+    },
   );
 
   action.addNodeAction(
     'searchRecursive',
     async ({ node }) => {
-      await file.searchByCocList(pathLib.dirname(node.fullpath), true);
+      logger.error(
+        'searchRecursive action has been deprecated, please use "search:recursive" instead of it',
+      );
+      await file.searchByCocList(pathLib.dirname(node.fullpath), {
+        recursive: true,
+        noIgnore: false,
+        strict: false,
+      });
     },
     'search by coc-list recursively',
   );
@@ -594,14 +761,16 @@ export function loadFileActions(action: ActionSource<FileSource, FileNode>) {
     'toggleOnlyGitChange',
     async () => {
       file.showOnlyGitChange = !file.showOnlyGitChange;
-      const loadNotifier = await file.loadNotifier(file.view.rootNode, {
-        force: true,
-      });
+      await file.view.sync(async (r) => {
+        const loadNotifier = await file.loadNotifier(r, file.view.rootNode, {
+          force: true,
+        });
 
-      nvim.pauseNotification();
-      file.highlight.clearHighlightsNotify();
-      loadNotifier?.notify();
-      await nvim.resumeNotification();
+        nvim.pauseNotification();
+        file.highlight.clearHighlightsNotify();
+        loadNotifier?.notify();
+        await nvim.resumeNotification();
+      });
     },
     'toggle visibility of git change node',
     { reload: true },

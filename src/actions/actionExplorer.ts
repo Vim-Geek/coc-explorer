@@ -1,19 +1,17 @@
-import { Mutex } from 'await-semaphore';
-import { Notifier } from 'coc-helper';
-import { workspace } from 'coc.nvim';
-import { Explorer } from '../explorer';
+import { Mutex, window } from 'coc.nvim';
+import type { Explorer } from '../explorer';
 import { keyMapping } from '../mappings';
-import { BaseTreeNode, ExplorerSource } from '../source/source';
-import { MoveStrategy } from '../types';
-import { enableWrapscan, onError, scanIndexNext, scanIndexPrev } from '../util';
+import type { BaseTreeNode, ExplorerSource } from '../source/source';
+import type { MoveStrategy } from '../types';
+import { enableWrapscan, logger, scanIndexNext, scanIndexPrev } from '../util';
 import { ActionRegistrar } from './registrar';
-import { ActionExp, MappingMode } from './types';
+import type { ActionExp, MappingMode } from './types';
 
 export class ActionExplorer extends ActionRegistrar<
   Explorer,
   BaseTreeNode<any>
 > {
-  readonly actionMutex = new Mutex();
+  readonly waitActionMutex = new Mutex();
   readonly explorer = this.owner;
   get locator() {
     return this.explorer.locator;
@@ -23,14 +21,12 @@ export class ActionExplorer extends ActionRegistrar<
     super(owner);
   }
 
-  async doActionByKey(key: string, mode: MappingMode, count: number = 1) {
+  async doActionByKey(key: string, mode: MappingMode, count = 1) {
     for (let c = 0; c < count; c++) {
-      const selectedLineIndexes = await this.explorer.getSelectedOrCursorLineIndexes(
-        mode,
-      );
-      const lineIndexesGroups = this.explorer.lineIndexesGroupBySource(
-        selectedLineIndexes,
-      );
+      const selectedLineIndexes =
+        await this.explorer.getSelectedOrCursorLineIndexes(mode);
+      const lineIndexesGroups =
+        this.explorer.lineIndexesGroupBySource(selectedLineIndexes);
       for (const { source, lineIndexes } of lineIndexesGroups) {
         const actionExp = keyMapping.getActionExp(source.sourceType, key, mode);
         if (actionExp) {
@@ -41,12 +37,7 @@ export class ActionExplorer extends ActionRegistrar<
         }
       }
     }
-    const notifiers = await Promise.all(
-      this.explorer.sources.map((source) =>
-        source.view.emitRequestRenderNodesNotifier(),
-      ),
-    );
-    await Notifier.runAll(notifiers);
+    await this.explorer.view.emitRequestRenderNodes();
   }
 
   async doActionExp(
@@ -93,17 +84,15 @@ export class ActionExplorer extends ActionRegistrar<
             .push(source.view.flattenedNodes[relativeLineIndex]);
         }
 
-        for (const [source, nodes] of nodesGroup.entries()) {
+        for (const [source, nodes] of nodesGroup) {
           await source.action.doActionExp(actionExp, nodes, { mode });
         }
       }
     } catch (error) {
-      // eslint-disable-next-line no-restricted-properties
-      workspace.showMessage(
-        `Error when do action ${JSON.stringify(actionExp)}`,
-        'error',
+      await window.showErrorMessage(
+        `Error when do action(${JSON.stringify(actionExp)})`,
       );
-      onError(error);
+      logger.error(error);
     }
   }
 

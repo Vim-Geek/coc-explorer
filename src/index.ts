@@ -1,27 +1,33 @@
+import { activateHelper, registerRuntimepath } from 'coc-helper';
 import {
-  ExtensionContext,
   commands,
-  workspace,
-  listManager,
-  Disposable,
+  ExtensionContext,
   languages,
+  listManager,
+  workspace,
 } from 'coc.nvim';
-import { hlGroupManager } from './highlight/manager';
-import { ExplorerManager } from './explorerManager';
-import { PresetList } from './lists/presets';
-import { registerVimApi } from './vimApi';
-import { InternalVimEvents } from './events';
-import { asyncCatchError, onError, registerRuntimepath } from './util';
 import { ActionMenuCodeActionProvider } from './actions/codeActionProider';
-import { activateHelper } from 'coc-helper';
+import { BufManager } from './bufManager';
+import { config } from './config';
+import { tabContainerManager } from './container';
+import { registerInternalEvents } from './events';
+import { ExplorerManager } from './explorerManager';
+import { GitCommand } from './git/command';
+import { registerGitHighlights } from './git/highlights';
+import { registerInternalColors } from './highlight/internalColors';
+import { hlGroupManager } from './highlight/manager';
+import { PresetList } from './lists/presets';
+import { registerMappings } from './mappings/manager';
+import { logger } from './util';
+import { registerVimApi } from './vimApi';
 
-export const activate = async (context: ExtensionContext) => {
+export const activate = (context: ExtensionContext) => {
   const { subscriptions } = context;
   const { nvim } = workspace;
-  await activateHelper(context);
-  await InternalVimEvents.register(context);
+  const debug = config.get<boolean>('debug');
+  logger.level = debug ? 'debug' : 'info';
 
-  hlGroupManager.group(
+  hlGroupManager.createGroup(
     'SelectUI',
     'ctermbg=27 ctermfg=0 guibg=#1593e5 guifg=#ffffff',
   );
@@ -30,13 +36,19 @@ export const activate = async (context: ExtensionContext) => {
 
   listManager.registerList(new PresetList(nvim));
 
-  const explorerManager = new ExplorerManager(context);
+  const bufManager = new BufManager(context);
+  const explorerManager = new ExplorerManager(context, bufManager);
   registerVimApi(context, explorerManager);
 
+  GitCommand.preload().catch(logger.error);
+
   subscriptions.push(
-    commands.registerCommand('explorer', (...args) => {
-      explorerManager.open(args).catch(onError);
-    }),
+    commands.registerCommand(
+      'explorer',
+      logger.asyncCatch((...args) => {
+        explorerManager.open(args).catch(logger.error);
+      }),
+    ),
     languages.registerCodeActionProvider(
       ['coc-explorer'],
       new ActionMenuCodeActionProvider(explorerManager),
@@ -44,15 +56,16 @@ export const activate = async (context: ExtensionContext) => {
     ),
   );
   (async () => {
-    await registerRuntimepath(context.extensionPath);
+    await activateHelper(context);
+    registerInternalEvents(context);
+    await registerRuntimepath(context);
     await nvim.command('runtime plugin/coc_explorer.vim');
-    subscriptions.push(
-      Disposable.create(
-        asyncCatchError(() => {
-          return nvim.call('CocExplorerDeactivate');
-        }),
-      ),
-    );
-    await explorerManager.events.fire('didAutoload');
-  })().catch(onError);
+    registerGitHighlights(subscriptions);
+    registerInternalColors(subscriptions);
+    await registerMappings(context, explorerManager);
+    await explorerManager.events.fire('inited');
+    await tabContainerManager.initedEmitter.fire();
+    bufManager.reload().catch(logger.error);
+    await tabContainerManager.register();
+  })().catch(logger.error);
 };

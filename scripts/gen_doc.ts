@@ -1,9 +1,8 @@
-import Pkg from '../package.json';
 import fs from 'fs';
-import { JSONSchema4, JSONSchema7, JSONSchema7Type } from 'json-schema';
-import ts from 'typescript';
-import util from 'util';
+import type { JSONSchema7, JSONSchema7Type } from 'json-schema';
 import pathLib from 'path';
+import ts from 'typescript';
+import Pkg from '../package.json';
 
 const fsp = fs.promises;
 
@@ -48,11 +47,13 @@ abstract class DocGenerator {
       }
       if (row.default !== undefined) {
         hideLine += 'Default: ';
-        hideLine +=
-          '<pre><code>' + this.printJson(row.default, true) + '</code></pre>';
+        hideLine += `<pre><code>${this.printJson(
+          row.default,
+          true,
+        )}</code></pre>`;
       }
       if (hideLine) {
-        lines.push(`<details>`);
+        lines.push('<details>');
       }
       lines.push(
         `<summary><code>${row.name}</code>: ${row.description}.</summary>`,
@@ -83,7 +84,7 @@ abstract class DocGenerator {
         descriptions.push(`default: \`${this.printJson(row.default)}\``);
       }
       if (descriptions.length) {
-        line += ': ' + descriptions.join(', ');
+        line += `: ${descriptions.join(', ')}`;
       }
       lines.push(line);
     });
@@ -94,9 +95,7 @@ abstract class DocGenerator {
     const markdown = await fsp.readFile(markdownPath, 'utf8');
     const markdownLines = markdown.split('\n');
     let startIndex = markdownLines.findIndex((line) =>
-      new RegExp('#'.repeat(headLevel) + '\\s*' + attachTitle + '\\s*').test(
-        line,
-      ),
+      new RegExp(`${'#'.repeat(headLevel)}\\s*${attachTitle}\\s*`).test(line),
     );
     if (startIndex < 0) {
       return;
@@ -120,6 +119,7 @@ abstract class DocGenerator {
     lines.push('');
     markdownLines.splice(startIndex, removeCount, ...lines);
     await fsp.writeFile(markdownPath, markdownLines.join('\n'));
+    // eslint-disable-next-line no-console
     console.log(`Attached to ${attachTitle} header`);
   }
 }
@@ -162,7 +162,9 @@ class ConfigurationDocGenerator extends DocGenerator {
     }
 
     function debug(node: ts.Node) {
+      // eslint-disable-next-line no-console
       console.log(Kind[node.kind]);
+      // eslint-disable-next-line no-console
       console.log(print(node));
     }
 
@@ -192,7 +194,9 @@ class ConfigurationDocGenerator extends DocGenerator {
             // @ts-ignore
             const jsonProp = conf.properties[name as any] as Definition & {
               default_doc?: string;
+              deprecationMessage?: string;
             };
+            if (jsonProp.deprecationMessage) return;
             propRows.push({
               name,
               description: ts.displayPartsToString(
@@ -206,6 +210,7 @@ class ConfigurationDocGenerator extends DocGenerator {
           });
         }
       } else {
+        // eslint-disable-next-line no-console
         console.error(`[gen_doc] ${filename} not support ${print(node)}`);
       }
     });
@@ -241,4 +246,5 @@ async function main() {
   );
 }
 
+// eslint-disable-next-line no-console
 main().catch(console.error);

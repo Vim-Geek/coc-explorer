@@ -1,10 +1,11 @@
-import { BufferHighlight } from '@chemzqm/neovim';
-import { Disposable, workspace } from 'coc.nvim';
-import { FloatingCreateOptions, FloatingOpenOptions } from '../types';
+import { BufferHighlight, Disposable, workspace } from 'coc.nvim';
+import type { FloatingCreateOptions, FloatingOpenOptions } from '../types';
 import { FloatingWindow as HelperFloatingWindow } from 'coc-helper';
+import { logger } from '../util';
 
 export class FloatingWindow implements Disposable {
   bufnr: number;
+  closeTimer?: NodeJS.Timeout;
 
   static async create(options: FloatingCreateOptions = {}) {
     const win = await HelperFloatingWindow.create({
@@ -28,6 +29,9 @@ export class FloatingWindow implements Disposable {
     highlights: BufferHighlight[],
     options: FloatingOpenOptions,
   ) {
+    if (this.closeTimer) {
+      clearTimeout(this.closeTimer);
+    }
     await this.win.open({
       top: options.top,
       left: options.left,
@@ -43,7 +47,7 @@ export class FloatingWindow implements Disposable {
         const scripts: string[] = [];
         if (workspace.isNvim) {
           scripts.push(`
-            let store_winid = bufwinid(bufnr())
+            let store_winid = win_getid(winnr())
             if store_winid != ${winid}
               noau let successful = win_gotoid(${winid})
               if !successful
@@ -82,13 +86,22 @@ export class FloatingWindow implements Disposable {
           }
           if (options.filetype) {
             scripts.push(
-              `call win_execute(${winid}, 'set filetype=${options.filetype}'`,
+              `call win_execute(${winid}, 'set filetype=${options.filetype}')`,
             );
           }
         }
         return scripts.join('\n');
       },
     });
+  }
+
+  async closeDelay(ms: number) {
+    if (this.closeTimer) {
+      clearTimeout(this.closeTimer);
+    }
+    this.closeTimer = setTimeout(() => {
+      this.win.close().catch(logger.error);
+    }, ms);
   }
 
   async close() {

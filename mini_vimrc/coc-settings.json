@@ -2,7 +2,7 @@
   "explorer.sources": [
     {
       "name": "buffer",
-      "expand": false
+      "expand": true
     },
     {
       "name": "file",
@@ -10,7 +10,12 @@
     }
   ],
   "explorer.keyMappings.global": {
-    "<space>": "toggleSelection"
+    "<space>": "toggleSelection",
+    "L": [
+      "expandable?",
+      ["expanded?", "cd", "expand"],
+      ["collapse", "cd"]
+    ]
   },
   "explorer.presets": {
     "floating": {
@@ -20,6 +25,10 @@
   },
   "explorer.icon.enableNerdfont": true,
   "explorer.buffer.tabOnly": true,
-  "explorer.file.autoReveal": false,
+  "explorer.file.reveal.whenOpen": false,
+  "explorer.file.reveal.filter": {
+    "literals": ["node_modules"]
+  },
+  "explorer.mouseMode": "singleclick",
   "explorer.debug": true
 }

@@ -1,14 +1,15 @@
 import fs from 'fs';
+import os from 'os';
 import makeDir from 'make-dir';
 import pathLib from 'path';
 import readline from 'readline';
-import rimraf from 'rimraf';
-import trash from 'trash';
+import { rimraf } from 'rimraf';
 import { promisify } from 'util';
 import { input, prompt } from '.';
 import { execCmd } from './cli';
 import { isWindows } from './platform';
 import { trashCmd } from './trash';
+import minimatch from 'minimatch';
 
 export const fsOpen = promisify(fs.open);
 export const fsClose = promisify(fs.close);
@@ -30,14 +31,11 @@ export const fsStat = promisify(fs.stat);
 export const fsLstat = promisify(fs.lstat);
 export const fsCopyFile = promisify(fs.copyFile);
 export const fsRename = promisify(fs.rename);
-export const fsRimraf = promisify(rimraf);
+export const fsRemove = rimraf;
 
 export const fsTrash = async (paths: string | string[]) => {
   await trashCmd.exec(typeof paths === 'string' ? [paths] : paths);
 };
-
-export const nodejsModuleTrash = (paths: string | string[]) =>
-  trash(paths, { glob: false });
 
 export async function fsCopyFileRecursive(
   sourcePath: string,
@@ -82,14 +80,20 @@ export async function fsMergeDirectory(
   }
 }
 
+/**
+ * Overwrite prompt when file exists.
+ * @returns  {Promise<void>}
+ */
 export async function overwritePrompt<S extends string | undefined>(
   promptText: string,
   paths: { source: S; target: string }[],
   action: (source: S, target: string) => Promise<void>,
-) {
+): Promise<{ endFullpaths: string[] }> {
+  const endFullpaths: string[] = [];
   const finalAction = async (source: string | undefined, target: string) => {
     await fsMkdirp(pathLib.dirname(target));
     await action(source as S, target);
+    endFullpaths.push(target);
   };
   for (let i = 0, len = paths.length; i < len; i++) {
     const sourcePath = paths[i].source;
@@ -104,7 +108,7 @@ export async function overwritePrompt<S extends string | undefined>(
       typeof sourcePath === 'string' ? await fsLstat(sourcePath) : undefined;
     const targetLstat = await fsLstat(targetPath);
 
-    async function rename() {
+    const rename = async function () {
       const newTargetPath = await input(
         `Rename: ${targetPath} ->`,
         targetPath,
@@ -115,16 +119,15 @@ export async function overwritePrompt<S extends string | undefined>(
         return;
       }
       return finalAction(sourcePath, newTargetPath);
-    }
-    async function replace() {
+    };
+    const replace = async function () {
       await fsTrash(targetPath);
       return finalAction(sourcePath, targetPath);
-    }
-    function quit() {
+    };
+    const quit = function () {
       i = len;
-      return;
-    }
-    async function prompt_(
+    };
+    const prompt_ = async function (
       choices: Record<string, undefined | (() => void | Promise<void>)> = {},
     ) {
       choices = {
@@ -143,14 +146,14 @@ export async function overwritePrompt<S extends string | undefined>(
       if (answer && answer in choices) {
         return choices[answer]?.();
       }
-    }
+    };
 
     if (sourcePath && sourceLstat?.isDirectory()) {
       if (targetLstat.isDirectory()) {
         await prompt_({
-          merge: () => fsMergeDirectory(sourcePath!, targetPath, finalAction),
+          merge: () => fsMergeDirectory(sourcePath, targetPath, finalAction),
           'one by one': async () => {
-            const files = await fsReaddir(sourcePath!);
+            const files = await fsReaddir(sourcePath);
             const paths = files.map((source) => ({
               source: source as S,
               target: pathLib.join(targetPath, pathLib.basename(source)),
@@ -169,6 +172,7 @@ export async function overwritePrompt<S extends string | undefined>(
       }
     }
   }
+  return { endFullpaths };
 }
 
 export function readFileLines(
@@ -209,6 +213,40 @@ export function readFileLines(
   });
 }
 
+export async function inDirectory(
+  dir: string,
+  patterns: string[],
+): Promise<boolean> {
+  try {
+    const files = await fsReaddir(dir);
+    for (const pattern of patterns) {
+      // note, only '*' expanded
+      const isWildcard = pattern.includes('*');
+      const ret = isWildcard
+        ? minimatch.match(files, pattern, {
+            nobrace: true,
+            noext: true,
+            nocomment: true,
+            nonegate: true,
+            dot: true,
+          }).length !== 0
+        : files.includes(pattern);
+      if (ret) return true;
+    }
+  } catch {
+    // could be failed when without permission
+  }
+  return false;
+}
+
+export function displayedFullpath(s: string) {
+  const homePath = os.homedir();
+  if (s.startsWith(homePath)) {
+    return `~${s.slice(homePath.length)}`;
+  }
+  return s;
+}
+
 export async function listDrive(): Promise<string[]> {
   if (isWindows) {
     const content = await execCmd('wmic', ['logicaldisk', 'get', 'name']);
@@ -216,9 +254,9 @@ export async function listDrive(): Promise<string[]> {
       .split('\n')
       .map((d) => d.trim())
       .filter((d) => d.endsWith(':'))
-      .map((d) => d + '\\');
+      .map((d) => `${d}\\`);
     return list;
   } else {
-    throw new Error('not support listDrive in ' + process.platform);
+    throw new Error(`not support listDrive in ${process.platform}`);
   }
 }

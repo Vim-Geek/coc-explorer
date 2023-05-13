@@ -1,100 +1,38 @@
-import {
-  Disposable,
-  disposeAll,
-  Emitter,
-  ExtensionContext,
-  workspace,
-} from 'coc.nvim';
-import { HelperEventEmitter } from 'coc-helper';
-import { argOptions } from './arg/argOptions';
-import { BufManager } from './bufManager';
+import { HelperEventEmitter, isTest } from 'coc-helper';
+import { Disposable, disposeAll, ExtensionContext, workspace } from 'coc.nvim';
+import { firstValueFrom } from 'rxjs';
+import { argOptions, ResolvedArgs } from './arg/argOptions';
+import { Args } from './arg/parseArgs';
+import type { BufManager } from './bufManager';
 import { buildExplorerConfig, configLocal } from './config';
+import { tabContainerManager } from './container';
 import { GlobalContextVars } from './contextVariables';
 import { onBufEnter } from './events';
 import { Explorer } from './explorer';
-import { keyMapping } from './mappings';
-import { Args, ArgPosition } from './arg/parseArgs';
-import { compactI, onError, supportedNvimFloating } from './util';
-import { MappingMode } from './actions/types';
-
-export class TabContainer {
-  left?: Explorer;
-  right?: Explorer;
-  tab?: Explorer;
-  floating?: Explorer;
-
-  getExplorer(position: ArgPosition) {
-    return this[position];
-  }
-
-  setExplorer(position: ArgPosition, explorer: Explorer) {
-    this[position] = explorer;
-  }
-
-  all() {
-    const explorers = [];
-    if (this.left) {
-      explorers.push(this.left);
-    }
-    if (this.right) {
-      explorers.push(this.right);
-    }
-    if (this.tab) {
-      explorers.push(this.tab);
-    }
-    if (this.floating) {
-      explorers.push(this.floating);
-    }
-    return explorers;
-  }
-}
+import { Rooter } from './rooter';
+import { getClipboard } from './source/sources/file/clipboard/clipboard';
+import {
+  compactI,
+  currentBufnr,
+  fromHelperEvent,
+  logger,
+  supportedNvimFloating,
+} from './util';
 
 export class ExplorerManager {
   filetype = 'coc-explorer';
   previousBufnr = new GlobalContextVars<number>('previousBufnr');
   previousWindowID = new GlobalContextVars<number>('previousWindowID');
   maxExplorerID = 0;
-  tabContainer: Record<number, TabContainer> = {};
-  rootPathRecords: Set<string> = new Set();
   nvim = workspace.nvim;
-  bufManager: BufManager;
-
   events = new HelperEventEmitter<{
-    didAutoload: () => void;
-    registeredMapping: () => void;
-  }>(onError);
+    inited: () => void;
+  }>(logger);
+  waitInited = firstValueFrom(fromHelperEvent(this.events, 'inited'));
+  clipboardStorage = getClipboard(this);
 
-  waitAllEvents = ((self) => ({
-    didCount: 0,
-    did: false,
-    emitter: new Emitter<void>(),
-    keys: ['registeredMapping', 'didAutoload'] as const,
-    constructor() {
-      this.keys.forEach((key) => {
-        self.events.on(key, () => {
-          this.didCount += 1;
-          if (this.didCount >= this.keys.length) {
-            this.did = true;
-            this.emitter.fire();
-          }
-        });
-      });
-    },
-  }))(this);
-
-  /**
-   * mappings[mode][key] = '<Plug>(coc-action-mode-key)'
-   */
-  private mappings: Record<string, Record<string, string>> = {};
-
-  constructor(public context: ExtensionContext) {
-    this.waitAllEvents.constructor();
-
-    this.events.on('didAutoload', () => {
-      this.registerMappings().catch(onError);
-    });
-
-    this.updatePrevCtxVars(workspace.bufnr).catch(onError);
+  constructor(public context: ExtensionContext, public bufManager: BufManager) {
+    currentBufnr().then(this.updatePrevCtxVars.bind(this)).catch(logger.error);
     this.context.subscriptions.push(
       onBufEnter(async (bufnr) => {
         await this.updatePrevCtxVars(bufnr);
@@ -104,24 +42,18 @@ export class ExplorerManager {
     this.context.subscriptions.push(
       Disposable.create(() => disposeAll(this.explorers())),
     );
-
-    this.bufManager = new BufManager(this.context);
-  }
-
-  async currentTabId() {
-    return (await this.nvim.call('coc_explorer#tab#current_id')) as number;
-  }
-
-  async currentTabMaxId() {
-    return (await this.nvim.call('coc_explorer#tab#max_id')) as number;
-  }
-
-  async currentTabContainer(): Promise<undefined | TabContainer> {
-    return this.tabContainer[await this.currentTabId()];
   }
 
   private async updatePrevCtxVars(bufnr: number) {
+    if (isTest) return;
     if (!this.bufnrs().includes(bufnr)) {
+      const bufname = (await this.nvim.call('bufname')) as string;
+      if (
+        bufname.startsWith('list://') ||
+        bufname.startsWith('[coc-explorer]')
+      ) {
+        return;
+      }
       const filetype = await this.nvim.getVar('&filetype');
       if (filetype !== this.filetype) {
         await this.previousBufnr.set(bufnr);
@@ -171,7 +103,7 @@ export class ExplorerManager {
    * Get all winnrs from explorers
    */
   async winnrs() {
-    const container = await this.currentTabContainer();
+    const container = await tabContainerManager.currentTabContainer();
     const explorers = container?.all();
     if (explorers) {
       const winnrs = await Promise.all(
@@ -188,14 +120,14 @@ export class ExplorerManager {
    */
   explorers() {
     const explorers: Explorer[] = [];
-    for (const container of Object.values(this.tabContainer)) {
+    for (const container of tabContainerManager.values()) {
       explorers.push(...container.all());
     }
     return explorers;
   }
 
-  currentExplorer() {
-    return this.explorerByBufnr(workspace.bufnr);
+  async currentExplorer() {
+    return this.explorerByBufnr(await currentBufnr());
   }
 
   async explorerByWinid(winid: number) {
@@ -210,60 +142,33 @@ export class ExplorerManager {
     return this.explorers().find((e) => e.bufnr === bufnr);
   }
 
-  inExplorer() {
-    return this.currentExplorer() !== undefined;
+  async inExplorer() {
+    return (await this.currentExplorer()) !== undefined;
   }
 
-  async registerMappings() {
-    this.mappings = {};
-    const commonKeys = [...(await keyMapping.getCommonKeys())];
-    const keysModes: [MappingMode, string[]][] = [
-      ['n', commonKeys],
-      ['v', [...commonKeys, ...(await keyMapping.getVisualKeys())]],
-    ];
-    for (const [mode, keys] of keysModes) {
-      this.mappings[mode] = {};
-      for (const key of keys) {
-        if (this.mappings[mode][key]) {
-          continue;
-        }
-        if (mode === 'v' && ['o', 'j', 'k'].includes(key)) {
-          continue;
-        }
-        const plugKey = `explorer-key-${mode}-${key.replace(
-          /\<(.*)\>/,
-          '[$1]',
-        )}`;
-        this.context.subscriptions.push(
-          workspace.registerKeymap([mode], plugKey, async () => {
-            const count = (await this.nvim.eval('v:count')) as number;
-            const explorer = this.currentExplorer();
-            explorer?.action
-              .doActionByKey(key, mode, count || 1)
-              .catch(onError);
-          }),
-        );
-        this.mappings[mode][key] = `<Plug>(coc-${plugKey})`;
-      }
+  private async checkResume(explorer: Explorer, argValues: ResolvedArgs) {
+    if (argValues.position.name !== 'floating') {
+      return true;
     }
-    await this.nvim.call('coc_explorer#mappings#register', [this.mappings]);
-    await this.events.fire('registeredMapping');
-  }
-
-  async executeMappings() {
-    await this.nvim.call('coc_explorer#mappings#execute', [this.mappings]);
-  }
-
-  async clearMappings() {
-    await this.nvim.call('coc_explorer#mappings#clear', [this.mappings]);
+    if (!(await (await explorer.sourceBuffer())?.loaded)) {
+      // Open a new explorer when sourceBuffer unload,
+      // because nvim will clear the wininfo of float win
+      // issue: https://github.com/weirongxu/coc-explorer/issues/472
+      await this.nvim.command(`bwipeout! ${explorer.bufnr}`);
+      return false;
+    }
+    if (!(await explorer.buffer.valid)) {
+      return false;
+    }
+    if (!(await this.nvim.call('bufexists', [explorer.borderBufnr]))) {
+      await this.nvim.command(`bwipeout! ${explorer.bufnr}`);
+      return false;
+    }
+    return true;
   }
 
   async open(argStrs: string[]) {
-    if (!this.waitAllEvents.did) {
-      await new Promise((resolve) => {
-        this.waitAllEvents.emitter.event(resolve);
-      });
-    }
+    await this.waitInited;
 
     let isFirst = true;
 
@@ -271,22 +176,20 @@ export class ExplorerManager {
     const explorerConfig = buildExplorerConfig(config);
 
     const args = await Args.parse(argStrs, config);
-    const position = await args.value(argOptions.position);
-    if (position === 'floating') {
+    const argValues = await args.values(argOptions);
+    const position = argValues.position;
+    if (position.name === 'floating') {
       if (!supportedNvimFloating()) {
         throw new Error('not support floating position in vim');
       }
     }
-    const quit = await args.value(argOptions.quit);
+    const quit = argValues.quit;
 
     const tabid =
-      position === 'tab'
-        ? (await this.currentTabMaxId()) + 1
-        : await this.currentTabId();
-    if (!(tabid in this.tabContainer)) {
-      this.tabContainer[tabid] = new TabContainer();
-    }
-    const tabContainer = this.tabContainer[tabid];
+      position.name === 'tab'
+        ? (await tabContainerManager.currentTabMaxId()) + 1
+        : await tabContainerManager.currentTabId();
+    const tabContainer = tabContainerManager.get(tabid);
 
     let explorer = tabContainer.getExplorer(position);
     if (explorer && quit) {
@@ -295,20 +198,28 @@ export class ExplorerManager {
     }
 
     const sourceWinid = (await this.nvim.call('win_getid')) as number;
-    const sourceBufnr = workspace.bufnr;
-    const rootPath = workspace.rootPath;
+    const sourceBufnr = await currentBufnr();
+    const rooter = new Rooter(workspace.root);
 
     if (!explorer || !(await this.nvim.call('bufexists', [explorer.bufnr]))) {
-      explorer = await Explorer.create(this, args, explorerConfig);
+      // Create a new explorer instance
+      explorer = await Explorer.create(this, argValues, explorerConfig);
       tabContainer.setExplorer(position, explorer);
     } else if (!(await explorer.inited.get())) {
+      // Delete invalid explorer and create a new
       await this.nvim.command(`bwipeout! ${explorer.bufnr}`);
-      explorer = await Explorer.create(this, args, explorerConfig);
+      explorer = await Explorer.create(this, argValues, explorerConfig);
       tabContainer.setExplorer(position, explorer);
     } else {
+      // Resume, toggle or focus
       const win = await explorer.win;
       if (!win) {
-        await explorer.resume(args);
+        if (await this.checkResume(explorer, argValues)) {
+          await explorer.resume(argValues);
+        } else {
+          explorer = await Explorer.create(this, argValues, explorerConfig);
+          tabContainer.setExplorer(position, explorer);
+        }
       } else {
         if (await args.value(argOptions.toggle)) {
           await explorer.quit();
@@ -324,6 +235,6 @@ export class ExplorerManager {
     }
     await explorer.sourceWinid.set(sourceWinid);
     await explorer.sourceBufnr.set(sourceBufnr);
-    await explorer.open(args, rootPath, isFirst);
+    await explorer.open(args, rooter, isFirst);
   }
 }

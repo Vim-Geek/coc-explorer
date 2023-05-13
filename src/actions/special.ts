@@ -1,4 +1,4 @@
-import { BaseTreeNode, ExplorerSource } from '../source/source';
+import type { BaseTreeNode, ExplorerSource } from '../source/source';
 
 export const conditionActionRules: Record<
   string,
@@ -28,4 +28,9 @@ export const conditionActionRules: Record<
 export const waitAction = {
   name: 'wait',
   helpDescription: '<wait>',
+};
+
+export const noopAction = {
+  name: 'noop',
+  helpDescription: '<noop>',
 };

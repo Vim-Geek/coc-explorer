@@ -1,5 +1,4 @@
 import { Notifier } from 'coc-helper';
-import { jestHelper } from 'coc-helper/JestHelper';
 import pathLib from 'path';
 import type {
   BaseTreeNode,
@@ -8,13 +7,14 @@ import type {
 } from '../source/source';
 import { FileNode, FileSource } from '../source/sources/file/fileSource';
 import { normalizePath } from '../util';
+import { rendererSourceSymbol } from '../view/rendererSource';
 import { FileSourceHelper } from '../__test__/helpers/fileSource';
-import { bootSource } from '../__test__/helpers/helper';
+import { bootSource, mockWorkspace } from '../__test__/helpers/helper';
 import { GitBinder } from './binder';
 import { gitManager } from './manager';
 import { GitFormat, GitMixedStatus } from './types';
 
-jestHelper.boot();
+mockWorkspace();
 
 const { loadChildren } = FileSourceHelper.genLoadChildren({
   name: pathLib.sep,
@@ -33,6 +33,14 @@ const { loadChildren } = FileSourceHelper.genLoadChildren({
     },
     {
       name: 'src',
+      children: [
+        {
+          name: 'main.ts',
+        },
+      ],
+    },
+    {
+      name: 'tests',
       children: [
         {
           name: 'test.ts',
@@ -67,29 +75,32 @@ test('GitBinder.reload', async () => {
   source.bootInit(true);
   await source.bootOpen(true);
   await source.load(source.view.rootNode);
-  await source.view.expand(source.view.rootNode.children![0]!);
 
   const renderPaths = new Set<string>();
 
-  Object.defineProperty(source.view, 'renderNodesNotifier', {
-    writable: true,
-    value: jest
-      .fn()
-      .mockImplementation(
-        (nodes: SourceOptions.RenderNodes<BaseTreeNode<any>>) => {
-          [...nodes].forEach((node) => {
-            if ('uid' in node) {
-              renderPaths.add(node.fullpath!);
-            } else {
-              for (const n of node.nodes) {
-                renderPaths.add(n.fullpath!);
+  Object.defineProperty(
+    source.view[rendererSourceSymbol],
+    'renderNodesNotifier',
+    {
+      writable: true,
+      value: jest
+        .fn()
+        .mockImplementation(
+          (nodes: SourceOptions.RenderNodes<BaseTreeNode<any>>) => {
+            [...nodes].forEach((node) => {
+              if ('uid' in node) {
+                renderPaths.add(node.fullpath!);
+              } else {
+                for (const n of node.nodes) {
+                  renderPaths.add(n.fullpath!);
+                }
               }
-            }
-          });
-          return Notifier.noop();
-        },
-      ),
-  });
+            });
+            return Notifier.noop();
+          },
+        ),
+    },
+  );
 
   Object.defineProperty(gitManager, 'getGitRoot', {
     writable: true,
@@ -112,7 +123,7 @@ test('GitBinder.reload', async () => {
   };
 
   await expectReloadGit(
-    ['!! lib/', ' M src/test.ts', 'M  readme.md', ' M package.json'],
+    ['!! lib/', ' M src/main.ts', 'M  readme.md', ' M package.json'],
     ['/', '/lib', '/src', '/readme.md', '/package.json'].map(normalizePath),
   );
 
@@ -131,7 +142,7 @@ test('GitBinder.reload', async () => {
   } as GitMixedStatus);
 
   await expectReloadGit(
-    ['!! lib/', ' M src/test.ts', 'M  readme.md'],
+    ['!! lib/', ' M src/main.ts', 'M  readme.md'],
     ['/package.json'].map(normalizePath),
   );
 });

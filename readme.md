@@ -2,9 +2,9 @@
 
 Explorer extension for [coc.nvim](https://github.com/neoclide/coc.nvim)
 
-**Note: Still under development, maybe has some breaking changes.**
+**Note: This project is still under development and may be broken.**
 
-[![Build Status](https://img.shields.io/github/workflow/status/weirongxu/coc-explorer/coc-explorer%20CI)](https://github.com/weirongxu/coc-explorer/actions)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/weirongxu/coc-explorer/ci.yml?branch=master)](https://github.com/weirongxu/coc-explorer/actions)
 
 ## Screenshot
 
@@ -22,13 +22,15 @@ Explorer extension for [coc.nvim](https://github.com/neoclide/coc.nvim)
    ```
 2. Configuration custom vim mapping
    ```
-   :nmap <space>e :CocCommand explorer<CR>
+   :nmap <space>e <Cmd>CocCommand explorer<CR>
    ```
 3. Open explorer
    ```
    <space>e
    ```
 4. Press `?` to show mappings help
+
+More at [Quickstart](https://github.com/weirongxu/coc-explorer/wiki/Quickstart)
 
 ## Feature
 
@@ -56,11 +58,11 @@ Explorer extension for [coc.nvim](https://github.com/neoclide/coc.nvim)
   - [x] Preview file attributes by floating window
   - [ ] LSP
     - [x] diagnostic
-    - [ ] file rename (won't support, use [watchman](https://github.com/neoclide/coc.nvim/wiki/Install-coc.nvim#optional-install-watchman-for-file-watching))
+    - [ ] file rename (won't support, use [watchman](https://github.com/neoclide/coc.nvim/wiki/Install-coc.nvim#install-watchman-for-file-watching))
   - [ ] Exrename, like [defx](https://github.com/Shougo/defx.nvim)
   - [ ] Archive file (use `lsar / unar`)
   - [ ] SSH
-- [x] Bookmark source (require [coc-bookmark](https://github.com/voldikss/coc-bookmark))
+- [x] ~~Bookmark source (DEPRECATED) (require [coc-bookmark](https://github.com/voldikss/coc-bookmark))~~
 - [ ] Git source
   - [ ] Git actions
 - [x] Show help
@@ -87,6 +89,12 @@ Explorer extension for [coc.nvim](https://github.com/neoclide/coc.nvim)
     \ /root/path
 ```
 
+Reveal to current buffer for closest coc-explorer
+
+```vim
+nmap <Leader>er <Cmd>call CocAction('runCommand', 'explorer.doAction', 'closest', ['reveal:0'], [['relative', 0, 'file']])<CR>
+```
+
 ### Presets
 
 ```vim
@@ -99,6 +107,10 @@ let g:coc_explorer_global_presets = {
 \   },
 \   'tab': {
 \     'position': 'tab',
+\     'quit-on-open': v:true,
+\   },
+\   'tab:$': {
+\     'position': 'tab:$',
 \     'quit-on-open': v:true,
 \   },
 \   'floating': {
@@ -131,23 +143,58 @@ let g:coc_explorer_global_presets = {
 \ }
 
 " Use preset argument to open it
-nmap <space>ed :CocCommand explorer --preset .vim<CR>
-nmap <space>ef :CocCommand explorer --preset floating<CR>
-nmap <space>ec :CocCommand explorer --preset cocConfig<CR>
-nmap <space>eb :CocCommand explorer --preset buffer<CR>
+nmap <space>ed <Cmd>CocCommand explorer --preset .vim<CR>
+nmap <space>ef <Cmd>CocCommand explorer --preset floating<CR>
+nmap <space>ec <Cmd>CocCommand explorer --preset cocConfig<CR>
+nmap <space>eb <Cmd>CocCommand explorer --preset buffer<CR>
 
 " List all presets
-nmap <space>el :CocList explPresets
+nmap <space>el <Cmd>CocList explPresets<CR>
 ```
 
 ### Options
 
 #### `[root-uri]`
 
-Explorer root, default:
+Explorer root, default is use `root-strategies`
 
-- `getcwd()` when `buftype` is `nofile`
-- `workspace.rootPath`
+#### `--root-strategies <root-strategies>`
+
+Strategies for root uri, types `list of (keep | workspace | cwd | sourceBuffer | reveal | custom:name)`
+
+- `keep`: never change the root path
+- `workspace`: `workspace.root`
+- `cwd`: `getcwd()`
+- `sourceBuffer`: directory of buffer
+- `reveal`: directory of reveal path
+
+default is: `workspace,cwd,sourceBuffer,reveal` or `"explorer.root.strategies" of coc-settings`
+
+**Custom root patterns settings**
+
+```jsonc
+{
+  "explorer.root.customRules": {
+    "vcs": {
+      "patterns": [".git", ".hg", ".projections.json"]
+    },
+    "vcs-r": {
+      "patterns": [".git", ".hg", ".projections.json"],
+      "bottomUp": true
+    }
+  }
+}
+```
+
+**Using custom root patterns**
+
+```jsonc
+{
+  "explorer.root.strategies": ["workspace", "custom:vcs", "custom:vcs-r"]
+}
+```
+
+or `:CocCommand explorer --root-strategies workspace,custom:vcs,custom:vcs-r`
 
 #### `--preset <name>`
 
@@ -185,7 +232,7 @@ buffer source │
 
 #### `--position <position>`
 
-Explorer position, supported position: `left`, `right`, `tab`, `floating`, default: `left`
+Explorer position, supported position: `left`, `right`, `tab`, `tab:0`, `tab:$`, `floating`, default: `left`
 
 #### `--width <number>`
 
@@ -354,6 +401,10 @@ default: `[filename][fullpath][position][line][annotation]`
 
 Explorer will expand to this filepath, default: `current buffer`
 
+#### `--reveal-when-open | --no-reveal-when-open`
+
+Explorer will automatically reveal to the current buffer when open explorer, default: `"explorer.file.reveal.whenOpen"`
+
 ## Template grammar
 
 **Example:**
@@ -403,6 +454,7 @@ You can use `?` to view all actions of current source
 {
   "explorer.keyMappings.global": {
     "i": false, // cancel default mapkey
+    "<c-o>": "noop",
 
     "*": "toggleSelection",
     "<tab>": "actionMenu",
@@ -447,7 +499,7 @@ You can use `?` to view all actions of current source
     "r": "rename",
 
     "zh": "toggleHidden",
-    "g.": "toggleHidden",
+    "g<dot>": "toggleHidden",
     "R": "refresh",
 
     "?": "help",
@@ -486,12 +538,12 @@ You can use `?` to view all actions of current source
 
 ## WIKI
 
-https://github.com/weirongxu/coc-explorer/wiki
+- https://github.com/weirongxu/coc-explorer/wiki
 
 ## FAQ
 
-https://github.com/weirongxu/coc-explorer/wiki/FAQ
-https://github.com/weirongxu/coc-explorer/issues?q=is%3Aissue+sort%3Aupdated-desc+label%3Aquestion
+- https://github.com/weirongxu/coc-explorer/wiki/FAQ
+- https://github.com/weirongxu/coc-explorer/issues?q=is%3Aissue+sort%3Aupdated-desc+label%3Aquestion
 
 ## Example by Vim API and event hooks
 
@@ -513,12 +565,12 @@ function! s:init_explorer()
   " Integration with other plugins
 
   " CocList
-  nmap <buffer> <Leader>fg :call <SID>exec_cur_dir('CocList -I grep')<CR>
-  nmap <buffer> <Leader>fG :call <SID>exec_cur_dir('CocList -I grep -regex')<CR>
-  nmap <buffer> <C-p> :call <SID>exec_cur_dir('CocList files')<CR>
+  nmap <buffer> <Leader>fg <Cmd>call <SID>exec_cur_dir('CocList -I grep')<CR>
+  nmap <buffer> <Leader>fG <Cmd>call <SID>exec_cur_dir('CocList -I grep -regex')<CR>
+  nmap <buffer> <C-p> <Cmd>call <SID>exec_cur_dir('CocList files')<CR>
 
   " vim-floaterm
-  nmap <buffer> <Leader>ft :call <SID>exec_cur_dir('FloatermNew --wintype=floating')<CR>
+  nmap <buffer> <Leader>ft <Cmd>call <SID>exec_cur_dir('FloatermNew --wintype=floating')<CR>
 endfunction
 
 function! s:enter_explorer()
@@ -553,6 +605,10 @@ more API: https://github.com/weirongxu/coc-explorer/wiki/Vim-API
 <!-- prettier-ignore-start -->
 <strong>Definitions</strong>
 <details>
+<summary><code>Position</code>: Position.</summary>
+Type: <pre><code>'left' | 'right' | 'tab' | 'floating'</code></pre>
+</details>
+<details>
 <summary><code>MappingActionExp</code>: MappingActionExp.</summary>
 Type: <pre><code>MappingAction | MappingActionExp[]</code></pre>
 </details>
@@ -567,6 +623,10 @@ Type: <pre><code>string | {
 <details>
 <summary><code>PreviewActionStrategy</code>: PreviewActionStrategy.</summary>
 Type: <pre><code>'labeling' | 'content'</code></pre>
+</details>
+<details>
+<summary><code>RootStrategy</code>: RootStrategy.</summary>
+Type: <pre><code>'keep' | 'workspace' | 'cwd' | 'sourceBuffer' | 'reveal'</code></pre>
 </details>
 <strong>Properties</strong>
 <details>
@@ -585,7 +645,7 @@ Type: <pre><code>{
         /**
          * Strategy for open action
          */
-        'open-action-strategy'?: 'select' | 'split' | 'split:plain' | 'split:intelligent' | 'vsplit' | 'vsplit:plain' | 'vsplit:intelligent' | 'tab' | 'previousBuffer' | 'previousWindow' | 'sourceWindow';
+        'open-action-strategy'?: 'select' | 'split' | 'split.plain' | 'split.intelligent' | 'vsplit' | 'vsplit.plain' | 'vsplit.intelligent' | 'tab' | 'previousBuffer' | 'previousWindow' | 'sourceWindow';
         /**
          * quit explorer when open action
          */
@@ -608,7 +668,12 @@ Type: <pre><code>{
         /**
          * Explorer position
          */
-        position?: 'left' | 'right' | 'tab' | 'floating';
+        position?: Position | [
+            Position
+        ] | [
+            Position,
+            string
+        ];
         /**
          * Width of explorer window for open in left or right side
          */
@@ -670,7 +735,11 @@ Type: <pre><code>{
         'file-child-labeling-template'?: string;
         [k: string]: unknown;
     };
-}</code></pre>
+}</code></pre>Default: <pre><code>null</code></pre>
+</details>
+<details>
+<summary><code>explorer.mouseMode</code>: Mouse mode.</summary>
+Type: <pre><code>'none' | 'singleclick' | 'doubleclick'</code></pre>Default: <pre><code>"doubleclick"</code></pre>
 </details>
 <details>
 <summary><code>explorer.keyMappingMode</code>: Keymapping mode.</summary>
@@ -706,7 +775,12 @@ Type: <pre><code>boolean</code></pre>Default: <pre><code>true</code></pre>
 </details>
 <details>
 <summary><code>explorer.position</code>: Explorer position.</summary>
-Type: <pre><code>'left' | 'right' | 'tab' | 'floating'</code></pre>Default: <pre><code>"left"</code></pre>
+Type: <pre><code>Position | [
+    Position
+] | [
+    Position,
+    string
+]</code></pre>Default: <pre><code>"left"</code></pre>
 </details>
 <details>
 <summary><code>explorer.width</code>: Width of explorer window for open in left or right side.</summary>
@@ -782,10 +856,6 @@ Type: <pre><code>'recursive'[]</code></pre>Default: <pre><code>[
 ]</code></pre>
 </details>
 <details>
-<summary><code>explorer.activeMode</code>: Render explorer when after open or save buffer.</summary>
-Type: <pre><code>boolean</code></pre>Default: <pre><code>true</code></pre>
-</details>
-<details>
 <summary><code>explorer.quitOnOpen</code>: quit explorer when open action.</summary>
 Type: <pre><code>boolean</code></pre>Default: <pre><code>false</code></pre>
 </details>
@@ -797,17 +867,21 @@ Type: <pre><code>false | PreviewActionStrategy | [
 ]</code></pre>Default: <pre><code>false</code></pre>
 </details>
 <details>
+<summary><code>explorer.previewAction.content.maxHeight</code>: Preview content maximum height.</summary>
+Type: <pre><code>number</code></pre>Default: <pre><code>30</code></pre>
+</details>
+<details>
 <summary><code>explorer.openAction.strategy</code>: Strategy for open action.</summary>
-Type: <pre><code>'select' | 'split' | 'split:plain' | 'split:intelligent' | 'vsplit' | 'vsplit:plain' | 'vsplit:intelligent' | 'tab' | 'previousBuffer' | 'previousWindow' | 'sourceWindow'</code></pre>Default: <pre><code>"select"</code></pre>
+Type: <pre><code>'select' | 'split' | 'split.plain' | 'split.intelligent' | 'vsplit' | 'vsplit.plain' | 'vsplit.intelligent' | 'tab' | 'previousBuffer' | 'previousWindow' | 'sourceWindow'</code></pre>Default: <pre><code>"select"</code></pre>
 </details>
 <details>
 <summary><code>explorer.openAction.select.filter</code>: Filter windows for select strategy.</summary>
-Type: <pre><code>OpenActionSelectFilter & {
+Type: <pre><code>BufferFilter & {
     /**
      * Filter windows for select strategy in source
      */
     sources?: {
-        [k: string]: OpenActionSelectFilter;
+        [k: string]: BufferFilter;
     };
     [k: string]: unknown;
 }</code></pre>Default: <pre><code>{
@@ -815,8 +889,11 @@ Type: <pre><code>OpenActionSelectFilter & {
     "terminal"
   ],
   "filetypes": [
+    "vista",
     "vista_kind",
-    "qf"
+    "qf",
+    "tagbar",
+    "coctree"
   ],
   "floatingWindows": true,
   "sources": {
@@ -833,6 +910,14 @@ Type: <pre><code>MappingAction | MappingActionExp[]</code></pre>Default: <pre><c
 <details>
 <summary><code>explorer.openAction.relativePath</code>: Use relative path when open a file with openAction.</summary>
 Type: <pre><code>boolean</code></pre>Default: <pre><code>false</code></pre>
+</details>
+<details>
+<summary><code>explorer.expandStores</code>: The expand stores of sources.</summary>
+Type: <pre><code>boolean | {
+    includes: string[];
+} | {
+    excludes: string[];
+}</code></pre>Default: <pre><code>true</code></pre>
 </details>
 <details>
 <summary><code>explorer.sources</code>: Explorer sources.</summary>
@@ -862,12 +947,38 @@ Type: <pre><code>{
 ]</code></pre>
 </details>
 <details>
+<summary><code>explorer.root.strategies</code>: Strategies for root uri.</summary>
+Type: <pre><code>(RootStrategy | string)[]</code></pre>Default: <pre><code>[
+  "workspace",
+  "cwd",
+  "sourceBuffer",
+  "reveal"
+]</code></pre>
+</details>
+<details>
+<summary><code>explorer.root.customRules</code>: Patterns for root uri.</summary>
+Type: <pre><code>{
+    [k: string]: {
+        patterns: string[];
+        /**
+         * Search outward from the current buffer, default is false
+         */
+        bottomUp?: boolean;
+        [k: string]: unknown;
+    };
+}</code></pre>Default: <pre><code>null</code></pre>
+</details>
+<details>
 <summary><code>explorer.enableFloatinput</code>: Enable integrated with coc-floatinput.</summary>
 Type: <pre><code>boolean</code></pre>Default: <pre><code>true</code></pre>
 </details>
 <details>
 <summary><code>explorer.icon.enableNerdfont</code>: Enable nerdfont.</summary>
 Type: <pre><code>boolean</code></pre>Default: <pre><code>false</code></pre>
+</details>
+<details>
+<summary><code>explorer.icon.source</code>: The source or file type icon and color.</summary>
+Type: <pre><code>'builtin' | 'vim-devicons' | 'nvim-web-devicons' | 'nerdfont.vim'</code></pre>Default: <pre><code>"builtin"</code></pre>
 </details>
 <details>
 <summary><code>explorer.icon.customIcons</code>: Custom icons and color highlights.</summary>
@@ -877,15 +988,20 @@ Type: <pre><code>{
      */
     icons?: {
         /**
-         * Group icon
+         * Icon for an extension group
          */
-        code: string;
-        /**
-         * Group icon color
-         */
-        color: string;
-        [k: string]: unknown;
-    }[];
+        [k: string]: {
+            /**
+             * Group icon
+             */
+            code: string;
+            /**
+             * Group icon color
+             */
+            color: string;
+            [k: string]: unknown;
+        };
+    };
     /**
      * File extension to icon group
      */
@@ -927,10 +1043,6 @@ Type: <pre><code>{
 }</code></pre>
 </details>
 <details>
-<summary><code>explorer.icon.enableVimDevicons</code>: Enable use vim-devicons instead of built-in icon configuration.</summary>
-Type: <pre><code>boolean</code></pre>Default: <pre><code>false</code></pre>
-</details>
-<details>
 <summary><code>explorer.icon.expanded</code>: Icon for expanded node.</summary>
 Type: <pre><code>string</code></pre>Default: <pre><code>"-"</code></pre>
 </details>
@@ -945,6 +1057,14 @@ Type: <pre><code>string</code></pre>Default: <pre><code>"✓"</code></pre>
 <details>
 <summary><code>explorer.icon.hidden</code>: Icon for hidden status.</summary>
 Type: <pre><code>string</code></pre>Default: <pre><code>"‥"</code></pre>
+</details>
+<details>
+<summary><code>explorer.icon.link</code>: Icon for soft link.</summary>
+Type: <pre><code>string</code></pre>Default: <pre><code>"→"</code></pre>
+</details>
+<details>
+<summary><code>explorer.icon.readonly</code>: Icon for readonly.</summary>
+Type: <pre><code>string</code></pre>Default: <pre><code>"RO"</code></pre>
 </details>
 <details>
 <summary><code>explorer.bookmark.root.template</code>: Template for root node of bookmark source.</summary>
@@ -983,8 +1103,26 @@ Type: <pre><code>string</code></pre>Default: <pre><code>"[name][bufname][fullpat
 Type: <pre><code>string</code></pre>Default: <pre><code>"yy/MM/dd HH:mm:ss"</code></pre>
 </details>
 <details>
-<summary><code>explorer.file.autoReveal</code>: Explorer will automatically expand to the current buffer.</summary>
+<summary><code>explorer.file.reveal.whenOpen</code>: Explorer will automatically reveal to the current buffer when open explorer.</summary>
 Type: <pre><code>boolean</code></pre>Default: <pre><code>true</code></pre>
+</details>
+<details>
+<summary><code>explorer.file.reveal.auto</code>: Explorer will automatically reveal to the current buffer when enter a buffer.</summary>
+Type: <pre><code>boolean</code></pre>Default: <pre><code>false</code></pre>
+</details>
+<details>
+<summary><code>explorer.file.reveal.filter</code>: Exlorer will not automatically reveal to these buffers.</summary>
+Type: <pre><code>{
+    /**
+     * Filter buffer by RegExp
+     */
+    patterns?: string[];
+    /**
+     * Filter buffer by literal string
+     */
+    literals?: string[];
+    [k: string]: unknown;
+}</code></pre>Default: <pre><code>{}</code></pre>
 </details>
 <details>
 <summary><code>explorer.file.hiddenRules</code>: Custom hidden rules for file.</summary>
@@ -1030,12 +1168,16 @@ Type: <pre><code>string</code></pre>Default: <pre><code>"[git | 2] [selection | 
 Type: <pre><code>string</code></pre>Default: <pre><code>"[fullpath][link][diagnosticError][diagnosticWarning][git][size][timeAccessed][timeModified][timeCreated][readonly][modified]"</code></pre>
 </details>
 <details>
+<summary><code>explorer.file.column.link.copy</code>: Whether the file has been copied.</summary>
+Type: <pre><code>string</code></pre>Default: <pre><code>null</code></pre>
+</details>
+<details>
 <summary><code>explorer.file.column.clip.copy</code>: Whether the file has been copied.</summary>
-Type: <pre><code>string</code></pre>
+Type: <pre><code>string</code></pre>Default: <pre><code>null</code></pre>
 </details>
 <details>
 <summary><code>explorer.file.column.clip.cut</code>: Whether the file has been cut.</summary>
-Type: <pre><code>string</code></pre>
+Type: <pre><code>string</code></pre>Default: <pre><code>null</code></pre>
 </details>
 <details>
 <summary><code>explorer.file.column.indent.chars</code>: Indent chars for file source.</summary>
@@ -1043,11 +1185,11 @@ Type: <pre><code>string</code></pre>Default: <pre><code>"  "</code></pre>
 </details>
 <details>
 <summary><code>explorer.file.column.indent.indentLine</code>: Whether to display the alignment line.</summary>
-Type: <pre><code>boolean</code></pre>
+Type: <pre><code>boolean</code></pre>Default: <pre><code>null</code></pre>
 </details>
 <details>
-<summary><code>explorer.file.tabCD</code>: Change tab directory when performing the cd action.</summary>
-Type: <pre><code>boolean</code></pre>Default: <pre><code>true</code></pre>
+<summary><code>explorer.file.cdCommand</code>: Change directory when performing the cd action.</summary>
+Type: <pre><code>false | 'cd' | 'tcd'</code></pre>Default: <pre><code>false</code></pre>
 </details>
 <details>
 <summary><code>explorer.filename.colored.enable</code>: Enable colored filenames based on status.</summary>
@@ -1060,7 +1202,7 @@ Type: <pre><code>boolean | {
 </details>
 <details>
 <summary><code>explorer.file.git.showUntrackedFiles</code>: Show untracked file in git.</summary>
-Type: <pre><code>boolean | 'system'</code></pre>
+Type: <pre><code>boolean | 'system'</code></pre>Default: <pre><code>null</code></pre>
 </details>
 <details>
 <summary><code>explorer.trash.command</code>: Trash command template, arguments(%s source filepath, %l source filepath list), example: 'trash-put %l', 'mv --backup=t %l ~/.trash/'.</summary>

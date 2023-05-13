@@ -1,23 +1,21 @@
-import { extensions, workspace } from 'coc.nvim';
+import { extensions, Location, Range, workspace } from 'coc.nvim';
 import pathLib from 'path';
-import { Location, Range } from 'vscode-languageserver-protocol';
 import { internalEvents } from '../../../events';
-import { debounce, fsExists, normalizePath } from '../../../util';
 import { hlGroupManager } from '../../../highlight/manager';
+import { debounceFn, fsExists, normalizePath } from '../../../util';
+import { ViewSource } from '../../../view/viewSource';
 import { BaseTreeNode, ExplorerSource } from '../../source';
 import { sourceManager } from '../../sourceManager';
-import { SourcePainters } from '../../sourcePainters';
 import { bookmarkArgOptions } from './argOptions';
 import { bookmarkColumnRegistrar } from './bookmarkColumnRegistrar';
 import './load';
 import BookmarkDB from './util/db';
 import { decode } from './util/encodeDecode';
-import { ViewSource } from '../../../view/viewSource';
 
 export interface BookmarkNode
   extends BaseTreeNode<BookmarkNode, 'root' | 'child'> {
   fullpath: string;
-  filename: string;
+  name: string;
   lnum: number;
   line: string;
   annotation: string | undefined;
@@ -37,37 +35,37 @@ export namespace BookmarkDB {
   export type Data = Record<Filepath, Collection>;
 }
 
-const hl = hlGroupManager.linkGroup.bind(hlGroupManager);
+const hlg = hlGroupManager.linkGroup.bind(hlGroupManager);
 
 export const bookmarkHighlights = {
-  title: hl('BookmarkRoot', 'Constant'),
-  hidden: hl('BookmarkHidden', 'Commment'),
-  expandIcon: hl('BookmarkExpandIcon', 'Directory'),
-  filename: hl('BookmarkFilename', 'String'),
-  fullpath: hl('BookmarkFullpath', 'Special'),
-  position: hl('BookmarkPosition', 'Comment'),
-  line: hlGroupManager.group(
+  title: hlg('BookmarkRoot', 'Constant'),
+  hidden: hlg('BookmarkHidden', 'Commment'),
+  expandIcon: hlg('BookmarkExpandIcon', 'Directory'),
+  filename: hlg('BookmarkFilename', 'String'),
+  fullpath: hlg('BookmarkFullpath', 'Special'),
+  position: hlg('BookmarkPosition', 'Comment'),
+  line: hlGroupManager.createGroup(
     'BookmarkLine',
     'ctermbg=27 ctermfg=0 guibg=#1593e5 guifg=#ffffff',
   ),
-  annotation: hl('BookmarkAnnotation', 'Comment'),
+  annotation: hlg('BookmarkAnnotation', 'Comment'),
 };
 
 export class BookmarkSource extends ExplorerSource<BookmarkNode> {
-  view: ViewSource<BookmarkNode> = new ViewSource<BookmarkNode>(this, {
-    type: 'root',
-    isRoot: true,
-    expandable: true,
-    uid: this.helper.getUid('0'),
-    fullpath: '',
-    filename: '',
-    lnum: -1,
-    line: '',
-    annotation: undefined,
-  });
-  sourcePainters: SourcePainters<BookmarkNode> = new SourcePainters<BookmarkNode>(
+  view: ViewSource<BookmarkNode> = new ViewSource<BookmarkNode>(
     this,
     bookmarkColumnRegistrar,
+    {
+      type: 'root',
+      isRoot: true,
+      expandable: true,
+      uid: this.helper.getUid('0'),
+      name: '',
+      fullpath: '',
+      lnum: -1,
+      line: '',
+      annotation: undefined,
+    },
   );
 
   static get enabled(): boolean | Promise<boolean> {
@@ -75,24 +73,22 @@ export class BookmarkSource extends ExplorerSource<BookmarkNode> {
   }
 
   async init() {
-    if (this.config.get('activeMode')) {
-      this.disposables.push(
-        internalEvents.on(
-          'CocBookmarkChange',
-          debounce(500, async () => {
-            await this.load(this.view.rootNode);
-          }),
-        ),
-      );
-    }
+    this.disposables.push(
+      internalEvents.on(
+        'CocBookmarkChange',
+        debounceFn(500, async () => {
+          await this.load(this.view.rootNode);
+        }),
+      ),
+    );
   }
 
   async open() {
-    await this.sourcePainters.parseTemplate(
+    await this.view.parseTemplate(
       'root',
       await this.explorer.args.value(bookmarkArgOptions.bookmarkRootTemplate),
     );
-    await this.sourcePainters.parseTemplate(
+    await this.view.parseTemplate(
       'child',
       await this.explorer.args.value(bookmarkArgOptions.bookmarkChildTemplate),
       await this.explorer.args.value(
@@ -100,7 +96,7 @@ export class BookmarkSource extends ExplorerSource<BookmarkNode> {
       ),
     );
 
-    this.view.rootNode.fullpath = this.explorer.rootUri;
+    this.view.rootNode.fullpath = this.explorer.root;
   }
 
   async loadChildren(parentNode: BookmarkNode) {
@@ -128,9 +124,9 @@ export class BookmarkSource extends ExplorerSource<BookmarkNode> {
         const bookmark: BookmarkDB.Item = bookmarks[lnum];
         bookmarkNodes.push({
           type: 'child',
-          uid: this.helper.getUid(fullpath + ':' + lnum),
+          uid: this.helper.getUid(`${fullpath}:${lnum}`),
           fullpath,
-          filename: pathLib.basename(fullpath),
+          name: pathLib.basename(fullpath),
           lnum,
           location: Location.create(fullpath, Range.create(lnum, -1, lnum, -1)),
           line: bookmark.line,

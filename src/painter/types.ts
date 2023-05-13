@@ -1,6 +1,6 @@
-import { HighlightPosition } from '../highlight/types';
-import { NodeUid } from '../source/source';
-import { ViewRowPainter } from '../source/viewPainter';
+import type { HighlightPosition } from '../highlight/types';
+import type { NodeUid } from '../source/source';
+import type { ViewRowPainter } from '../source/viewPainter';
 
 // Flexible types
 export type DrawFlexiblePosition = 'left' | 'right' | 'center';
@@ -21,7 +21,7 @@ export type DrawContent = {
   type: 'content';
   content: string;
   /**
-   * Calculate width via `displayWidth()` when unicode is true
+   * Calculate width via `workspace.nvim.strWidth()` when unicode is true
    */
   unicode?: boolean;
   width?: number;

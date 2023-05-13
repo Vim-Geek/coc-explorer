@@ -1,19 +1,9 @@
-import { setImmediate } from 'timers';
-import { onError } from '.';
+import { logger } from '.';
 
-export function asyncCatchError<R extends any, ARGS extends any[]>(
-  fn: (...args: ARGS) => R | Promise<R>,
-) {
-  return async (...args: ARGS) => {
-    try {
-      return await fn(...args);
-    } catch (e) {
-      onError(e);
-    }
-  };
-}
-
-export function queueAsyncFunction<R extends any, ARGS extends any[]>(
+/**
+ * @deprecated
+ */
+export function queueAsyncFunction<R, ARGS extends any[]>(
   fn: (...args: ARGS) => Promise<R>,
 ): (...args: ARGS) => Promise<R> {
   type Task = {
@@ -27,18 +17,20 @@ export function queueAsyncFunction<R extends any, ARGS extends any[]>(
   return async (...args: ARGS): Promise<R> => {
     if (!queueStarted) {
       queueStarted = true;
-      setImmediate(async () => {
-        while (queueTasks.length) {
-          const task = queueTasks.shift()!;
-          try {
-            const result = await task.fn(...task.args);
-            task.resolve(result);
-          } catch (error) {
-            task.reject(error);
+      setImmediate(
+        logger.asyncCatch(async () => {
+          while (queueTasks.length) {
+            const task = queueTasks.shift()!;
+            try {
+              const result = await task.fn(...task.args);
+              task.resolve(result);
+            } catch (error) {
+              task.reject(error as Error);
+            }
           }
-        }
-        queueStarted = false;
-      });
+          queueStarted = false;
+        }),
+      );
     }
     return await new Promise<R>((resolve, reject) => {
       queueTasks.push({

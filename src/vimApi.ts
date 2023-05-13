@@ -1,14 +1,15 @@
+import { WinLayoutFinder } from 'coc-helper';
 import { commands, ExtensionContext, workspace } from 'coc.nvim';
 import pathLib from 'path';
-import { MappingMode, OriginalActionExp } from './actions/types';
-import { Explorer } from './explorer';
-import { ExplorerManager } from './explorerManager';
-import { getDirectoryIcon, getFileIcon } from './icon/icons';
+import type { MappingMode, OriginalActionExp } from './actions/types';
+import { tabContainerManager } from './container';
+import type { Explorer } from './explorer';
+import type { ExplorerManager } from './explorerManager';
+import { IconInfo, IconTarget, loadIcons } from './icon/icons';
 import { actionListMru } from './lists/actions';
 import { parseOriginalActionExp } from './mappings';
-import { BaseTreeNode, ExplorerSource } from './source/source';
-import { asyncCatchError, compactI, onError } from './util';
-import { WinLayoutFinder } from './winLayoutFinder';
+import type { BaseTreeNode, ExplorerSource } from './source/source';
+import { compactI, logger } from './util';
 
 export function registerApi(
   id: string,
@@ -16,7 +17,7 @@ export function registerApi(
 ) {
   return commands.registerCommand(
     id,
-    asyncCatchError(execute),
+    logger.asyncCatch(execute),
     undefined,
     true,
   );
@@ -30,9 +31,9 @@ async function getExplorer(
 ): Promise<undefined | Explorer> {
   if (explorerFinder === 'closest') {
     const winFinder = await WinLayoutFinder.create();
-    const curWinid = (await workspace.nvim.call('bufwinid', [
-      workspace.bufnr,
-    ])) as number;
+    const curWinid = (await workspace.nvim.eval(
+      'win_getid(winnr())',
+    )) as number;
     if (curWinid <= -1) {
       return;
     }
@@ -48,7 +49,7 @@ async function getExplorer(
     if (node) {
       return explorerManager.explorerByWinid(node.winid);
     } else {
-      const current = await explorerManager.currentTabContainer();
+      const current = await tabContainerManager.currentTabContainer();
       const explorer = current?.floating;
       if ((await explorer?.winnr) !== undefined) {
         return explorer;
@@ -82,7 +83,6 @@ async function getLineIndexByPosition(
       }
     }
   }
-  return;
 }
 
 async function getSourceAndNodeByPosition(
@@ -97,7 +97,8 @@ async function getSourceAndNodeByPosition(
   }
   const source = explorer.sources.find(
     (source) =>
-      lineIndex >= source.view.startLineIndex && lineIndex < source.view.endLineIndex,
+      lineIndex >= source.view.startLineIndex &&
+      lineIndex < source.view.endLineIndex,
   );
   if (!source) {
     return [undefined, undefined];
@@ -115,7 +116,7 @@ export function registerVimApi(
     actionExp: OriginalActionExp,
     positions: Position[] = ['current'],
     mode: MappingMode = 'n',
-    count: number = 1,
+    count = 1,
   ) {
     const explorer = await getExplorer(explorerFinder, explorerManager);
     if (!explorer) {
@@ -135,7 +136,7 @@ export function registerVimApi(
         count,
         lineIndexes,
       })
-      .catch(onError);
+      .catch(logger.error);
   }
 
   context.subscriptions.push(
@@ -172,6 +173,7 @@ export function registerVimApi(
         }
         return {
           ...node,
+          compactedNodes: undefined,
           parent: undefined,
           children: undefined,
           prevSiblingNode: undefined,
@@ -181,9 +183,62 @@ export function registerVimApi(
     ),
     registerApi(
       'explorer.getIcon',
-      async (filepath: string, isDirectory: boolean = false) => {
+      async (filepath: string, isDirectory = false, isExpanded?: boolean) => {
         const basename = pathLib.basename(filepath);
-        return isDirectory ? getDirectoryIcon(basename) : getFileIcon(basename);
+        const type = isDirectory
+          ? ('directories' as const)
+          : ('files' as const);
+        const nodes: IconTarget[] = [
+          {
+            fullname: basename,
+            isDirectory,
+            expanded: isExpanded,
+            hidden: false,
+          },
+        ];
+        const icons = await loadIcons('builtin', nodes);
+        return icons?.[type].get(basename);
+      },
+    ),
+    registerApi(
+      'explorer.getIcons',
+      async (
+        paths: {
+          filepath: string;
+          isDirectory: boolean;
+          isExpanded?: boolean;
+        }[],
+      ) => {
+        const fullname2filepath: Record<string, string> = {};
+        const targets: IconTarget[] = paths.map((it) => {
+          const fullname = pathLib.basename(it.filepath);
+          fullname2filepath[fullname] = it.filepath;
+          return {
+            fullname,
+            isDirectory: it.isDirectory,
+            expanded: it.isExpanded,
+            hidden: false,
+          };
+        });
+        const icons = await loadIcons('builtin', targets);
+        if (!icons) {
+          return;
+        }
+        // convert the key from fullname to filepath
+        const result: {
+          files: Record<string, IconInfo>;
+          directories: Record<string, IconInfo>;
+        } = {
+          files: {},
+          directories: {},
+        };
+        for (const [fullname, file] of icons.files) {
+          result.files[fullname2filepath[fullname]] = file;
+        }
+        for (const [fullname, directory] of icons.directories) {
+          result.directories[fullname2filepath[fullname]] = directory;
+        }
+        return result;
       },
     ),
   );

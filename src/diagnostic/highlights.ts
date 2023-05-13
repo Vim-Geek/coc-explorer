@@ -1,7 +1,14 @@
+import { internalHighlightGroups } from '../highlight/internalColors';
 import { hlGroupManager } from '../highlight/manager';
 
-const hl = hlGroupManager.linkGroup.bind(hlGroupManager);
+const hlg = hlGroupManager.linkGroup.bind(hlGroupManager);
 export const diagnosticHighlights = {
-  diagnosticError: hl('DiagnosticError', 'CocErrorSign'),
-  diagnosticWarning: hl('DiagnosticWarning', 'CocWarningSign'),
+  diagnosticError: hlg(
+    'DiagnosticError',
+    internalHighlightGroups.CocErrorSignColor,
+  ),
+  diagnosticWarning: hlg(
+    'DiagnosticWarning',
+    internalHighlightGroups.CocWarningSignColor,
+  ),
 };

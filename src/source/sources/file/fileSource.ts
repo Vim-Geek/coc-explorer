@@ -1,13 +1,19 @@
-import { Uri, workspace } from 'coc.nvim';
+import { Notifier } from 'coc-helper';
+import { Uri, window, workspace } from 'coc.nvim';
 import fs from 'fs';
 import { homedir } from 'os';
 import pathLib from 'path';
 import { argOptions } from '../../../arg/argOptions';
+import { getRevealAuto, getRevealWhenOpen } from '../../../config';
 import { diagnosticHighlights } from '../../../diagnostic/highlights';
 import { onBufEnter } from '../../../events';
-import { gitHighlights } from '../../../git/highlights';
 import { gitManager } from '../../../git/manager';
+import { internalHighlightGroups } from '../../../highlight/internalColors';
+import { hlGroupManager } from '../../../highlight/manager';
 import { fileList } from '../../../lists/files';
+import { startCocList } from '../../../lists/runner';
+import type { RootStrategyStr } from '../../../types';
+import type { Explorer } from '../../../types/pkg-config';
 import {
   fsAccess,
   fsLstat,
@@ -16,19 +22,17 @@ import {
   getExtensions,
   isWindows,
   listDrive,
+  logger,
   normalizePath,
-  onError,
 } from '../../../util';
-import { hlGroupManager } from '../../../highlight/manager';
+import type { RendererSource } from '../../../view/rendererSource';
+import { ViewSource } from '../../../view/viewSource';
 import { BaseTreeNode, ExplorerSource } from '../../source';
 import { sourceManager } from '../../sourceManager';
-import { SourcePainters } from '../../sourcePainters';
 import { fileArgOptions } from './argOptions';
 import { loadFileActions } from './fileActions';
 import { fileColumnRegistrar } from './fileColumnRegistrar';
 import './load';
-import { Notifier } from 'coc-helper';
-import { ViewSource } from '../../../view/viewSource';
 
 export interface FileNode extends BaseTreeNode<FileNode, 'root' | 'child'> {
   name: string;
@@ -43,40 +47,37 @@ export interface FileNode extends BaseTreeNode<FileNode, 'root' | 'child'> {
   lstat?: fs.Stats;
 }
 
-const hl = hlGroupManager.linkGroup.bind(hlGroupManager);
+const hlg = hlGroupManager.linkGroup.bind(hlGroupManager);
+const directoryHighlight = hlg('FileDirectory', 'Directory');
 export const fileHighlights = {
-  title: hl('FileRoot', 'Constant'),
-  hidden: hl('FileHidden', 'Comment'),
-  rootName: hl('FileRootName', 'Identifier'),
-  expandIcon: hl('FileExpandIcon', 'Directory'),
-  fullpath: hl('FileFullpath', 'Comment'),
-  filename: hl('FileFilename', 'None'),
-  directory: hl('FileDirectory', 'Directory'),
-  directoryExpanded: hl('FileDirectoryExpanded', 'Directory'),
-  directoryCollapsed: hl('FileDirectoryCollapsed', 'Directory'),
-  linkTarget: hl('FileLinkTarget', 'Comment'),
-  gitStaged: hl('FileGitStaged', gitHighlights.gitStaged.group),
-  gitUnstaged: hl('FileGitUnstaged', gitHighlights.gitUnstaged.group),
-  gitRootStaged: hl('FileGitRootStaged', 'Comment'),
-  gitRootUnstaged: hl('FileGitRootUnstaged', 'Operator'),
-  indentLine: hl('IndentLine', 'Comment'),
-  clip: hl('FileClip', 'Statement'),
-  size: hl('FileSize', 'Constant'),
-  readonly: hl('FileReadonly', 'Operator'),
-  modified: hl('FileModified', 'Operator'),
-  timeAccessed: hl('TimeAccessed', 'Identifier'),
-  timeModified: hl('TimeModified', 'Identifier'),
-  timeCreated: hl('TimeCreated', 'Identifier'),
-  diagnosticError: hl(
+  title: hlg('FileRoot', 'Constant'),
+  hidden: hlg('FileHidden', internalHighlightGroups.CommentColor),
+  rootName: hlg('FileRootName', 'Identifier'),
+  expandIcon: hlg('FileExpandIcon', 'Directory'),
+  fullpath: hlg('FileFullpath', internalHighlightGroups.CommentColor),
+  filename: hlg('FileFilename', 'None'),
+  directory: directoryHighlight,
+  directoryExpanded: hlg('FileDirectoryExpanded', directoryHighlight.group),
+  directoryCollapsed: hlg('FileDirectoryCollapsed', directoryHighlight.group),
+  linkTarget: hlg('FileLinkTarget', internalHighlightGroups.CommentColor),
+  indentLine: hlg('IndentLine', internalHighlightGroups.CommentColor),
+  clip: hlg('FileClip', 'Statement'),
+  size: hlg('FileSize', 'Constant'),
+  readonly: hlg('FileReadonly', 'Operator'),
+  modified: hlg('FileModified', 'Operator'),
+  timeAccessed: hlg('TimeAccessed', 'Identifier'),
+  timeModified: hlg('TimeModified', 'Identifier'),
+  timeCreated: hlg('TimeCreated', 'Identifier'),
+  diagnosticError: hlg(
     'FileDiagnosticError',
     diagnosticHighlights.diagnosticError.group,
   ),
-  diagnosticWarning: hl(
+  diagnosticWarning: hlg(
     'FileDiagnosticWarning',
     diagnosticHighlights.diagnosticWarning.group,
   ),
-  filenameDiagnosticError: hl('FileFilenameDiagnosticError', 'CocErrorSign'),
-  filenameDiagnosticWarning: hl(
+  filenameDiagnosticError: hlg('FileFilenameDiagnosticError', 'CocErrorSign'),
+  filenameDiagnosticWarning: hlg(
     'FileFilenameDiagnosticWarning',
     'CocWarningSign',
   ),
@@ -85,29 +86,28 @@ export const fileHighlights = {
 export class FileSource extends ExplorerSource<FileNode> {
   scheme = 'file';
   showHidden: boolean = this.config.get<boolean>('file.showHiddenFiles')!;
-  showOnlyGitChange: boolean = false;
-  copiedNodes: Set<FileNode> = new Set();
-  cutNodes: Set<FileNode> = new Set();
-  view: ViewSource<FileNode> = new ViewSource<FileNode>(this, {
-    type: 'root',
-    isRoot: true,
-    uid: this.helper.getUid(pathLib.sep),
-    name: 'root',
-    fullpath: homedir(),
-    expandable: true,
-    directory: true,
-    readonly: true,
-    executable: false,
-    readable: true,
-    writable: true,
-    hidden: false,
-    symbolicLink: true,
-    lstat: undefined,
-  });
-  sourcePainters: SourcePainters<FileNode> = new SourcePainters<FileNode>(
+  showOnlyGitChange = false;
+  view: ViewSource<FileNode> = new ViewSource<FileNode>(
     this,
     fileColumnRegistrar,
+    {
+      type: 'root',
+      isRoot: true,
+      uid: this.helper.getUid(pathLib.sep),
+      name: 'root',
+      fullpath: homedir(),
+      expandable: true,
+      directory: true,
+      readonly: true,
+      executable: false,
+      readable: true,
+      writable: true,
+      hidden: false,
+      symbolicLink: true,
+      lstat: undefined,
+    },
   );
+  rootStrategies: RootStrategyStr[] = [];
 
   get root() {
     return this.view.rootNode.fullpath;
@@ -142,107 +142,106 @@ export class FileSource extends ExplorerSource<FileNode> {
     );
   }
 
+  getNodesByPaths(fullpaths: string[]) {
+    const fullpathSet = new Set(fullpaths);
+    return this.view.flattenedNodes.filter((node) =>
+      fullpathSet.has(node.fullpath),
+    );
+  }
+
   isGitChange(parentNode: FileNode, filename: string): boolean {
     return !!gitManager.getMixedStatus(
-      parentNode.fullpath + '/' + filename,
+      `${parentNode.fullpath}/${filename}`,
       false,
     );
   }
 
   getColumnConfig<T>(name: string, defaultValue?: T): T {
-    return this.config.get('file.column.' + name, defaultValue)!;
+    return this.config.get(`file.column.${name}`, defaultValue)!;
   }
 
   async init() {
-    if (this.config.get('activeMode')) {
-      if (this.config.get('file.autoReveal')) {
-        this.disposables.push(
-          onBufEnter(async (bufnr) => {
-            if (bufnr === this.explorer.bufnr) {
-              return;
-            }
-            if (!this.explorer.visible()) {
-              return;
-            }
-            const position = await this.explorer.args.value(
-              argOptions.position,
-            );
-            if (position === 'floating') {
-              return;
-            }
+    if (getRevealAuto(this.config)) {
+      this.disposables.push(
+        onBufEnter(async (bufnr) => {
+          if (bufnr === this.explorer.bufnr) {
+            return;
+          }
+          if (!this.explorer.visible()) {
+            return;
+          }
+          if (this.explorer.isFloating) {
+            return;
+          }
+          await this.view.sync(async (r) => {
             const fullpath = this.bufManager.getBufferNode(bufnr)?.fullpath;
             if (!fullpath) {
               return;
             }
             const [revealNode, notifiers] = await this.revealNodeByPathNotifier(
+              r,
               fullpath,
             );
             if (revealNode) {
               await Notifier.runAll(notifiers);
             }
-          }, 200),
-        );
-      }
+          });
+        }, 200),
+      );
     }
-
-    this.disposables.push(
-      this.events.on('loaded', () => {
-        this.copiedNodes.clear();
-        this.cutNodes.clear();
-      }),
-    );
 
     loadFileActions(this.action);
   }
 
   async open() {
-    await this.sourcePainters.parseTemplate(
+    await this.view.parseTemplate(
       'root',
       await this.explorer.args.value(fileArgOptions.fileRootTemplate),
       await this.explorer.args.value(fileArgOptions.fileRootLabelingTemplate),
     );
 
-    await this.sourcePainters.parseTemplate(
+    await this.view.parseTemplate(
       'child',
       await this.explorer.args.value(fileArgOptions.fileChildTemplate),
       await this.explorer.args.value(fileArgOptions.fileChildLabelingTemplate),
     );
 
-    this.root = this.explorer.rootUri;
+    this.root = this.explorer.root;
+    this.rootStrategies = this.explorer.argValues.rootStrategies;
   }
 
   async cd(fullpath: string) {
     const { nvim } = this;
     const escapePath = (await nvim.call('fnameescape', fullpath)) as string;
-    if (this.config.get<boolean>('file.tabCD')) {
+    type CdCmd = Explorer['explorer.file.cdCommand'];
+    let cdCmd: CdCmd;
+    const tabCd = this.config.get<boolean>('file.tabCD');
+    if (tabCd !== undefined && tabCd !== null) {
+      logger.error(
+        'explorer.file.tabCD has been deprecated, please use explorer.file.cdCommand instead of it',
+      );
+      if (tabCd) {
+        cdCmd = 'tcd';
+      } else {
+        cdCmd = 'cd';
+      }
+    } else {
+      cdCmd = this.config.get<CdCmd>('file.cdCommand');
+    }
+    if (cdCmd === 'tcd') {
       if (workspace.isNvim || (await nvim.call('exists', [':tcd']))) {
-        await nvim.command('tcd ' + escapePath);
-        // eslint-disable-next-line no-restricted-properties
-        workspace.showMessage(`Tab's CWD is: ${fullpath}`);
+        await nvim.command(`tcd ${escapePath}`);
+        await window.showInformationMessage(`Tab's CWD is: ${fullpath}`);
       }
-    } else {
-      await nvim.command('cd ' + escapePath);
-      // eslint-disable-next-line no-restricted-properties
-      workspace.showMessage(`CWD is: ${fullpath}`);
+    } else if (cdCmd === 'cd') {
+      await nvim.command(`cd ${escapePath}`);
+      await window.showInformationMessage(`CWD is: ${fullpath}`);
     }
   }
 
-  async revealPath() {
-    const revealPath = await this.explorer.args.value(argOptions.reveal);
-    if (revealPath) {
-      return revealPath;
-    } else {
-      const bufnr = await this.explorer.sourceBufnrBySourceWinid();
-      if (bufnr) {
-        return this.bufManager.getBufferNode(bufnr)?.fullpath ?? undefined;
-      }
-      return;
-    }
-  }
-
-  async openedNotifier(isFirst: boolean) {
+  async openedNotifier(renderer: RendererSource<FileNode>, isFirst: boolean) {
     const args = this.explorer.args;
-    const revealPath = await this.revealPath();
+    const revealPath = await this.explorer.revealPath();
     if (!revealPath) {
       if (isFirst) {
         return this.locator.gotoRootNotifier({ col: 1 });
@@ -252,8 +251,13 @@ export class FileSource extends ExplorerSource<FileNode> {
 
     const hasRevealPath = args.has(argOptions.reveal);
 
-    if (this.config.get('file.autoReveal') || hasRevealPath) {
+    if (
+      getRevealAuto(this.config) ||
+      getRevealWhenOpen(this.config, this.explorer.argValues.revealWhenOpen) ||
+      hasRevealPath
+    ) {
       const [revealNode, notifiers] = await this.revealNodeByPathNotifier(
+        renderer,
         revealPath,
       );
       if (revealNode !== undefined) {
@@ -283,27 +287,63 @@ export class FileSource extends ExplorerSource<FileNode> {
     }
   }
 
-  getPutTargetDir(node: FileNode) {
-    return this.getPutTargetNode(node).fullpath;
+  async searchByCocList(
+    path: string,
+    {
+      recursive,
+      noIgnore,
+      strict,
+    }: {
+      recursive: boolean;
+      noIgnore: boolean;
+      strict: boolean;
+    },
+  ) {
+    const listArgs = strict ? ['--strict'] : [];
+    const task = await startCocList(
+      this.explorer,
+      fileList,
+      {
+        showHidden: this.showHidden,
+        showIgnores: noIgnore,
+        rootPath: path,
+        recursive,
+        revealCallback: async (loc) => {
+          await task.waitExplorerShow();
+          await this.view.sync(async (r) => {
+            const [, notifiers] = await this.revealNodeByPathNotifier(
+              r,
+              Uri.parse(loc.uri).fsPath,
+            );
+            await Notifier.runAll(notifiers);
+          });
+        },
+      },
+      listArgs,
+    );
+    task.waitExplorerShow()?.catch(logger.error);
   }
 
-  async searchByCocList(path: string, recursive: boolean) {
-    fileList.showHidden = this.showHidden;
-    fileList.rootPath = path;
-    fileList.recursive = recursive;
-    fileList.revealCallback = async (loc) => {
-      await task.waitShow();
-      const [, notifiers] = await this.revealNodeByPathNotifier(
-        Uri.parse(loc.uri).fsPath,
-      );
-      await Notifier.runAll(notifiers);
-    };
-
-    const task = await this.startCocList(fileList);
-    task.waitShow()?.catch(onError);
+  filterForReveal(path: string, root: string) {
+    const filter = this.config.get('file.reveal.filter');
+    const relativePath = path.slice(root.length);
+    // filter by literals
+    for (const literal of filter.literals ?? []) {
+      if (relativePath.includes(literal)) {
+        return true;
+      }
+    }
+    // filter by patterns
+    for (const pattern of filter.patterns ?? []) {
+      if (new RegExp(pattern).test(relativePath)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   async revealNodeByPathNotifier(
+    renderer: RendererSource<FileNode>,
     path: string,
     {
       startNode = this.view.rootNode,
@@ -324,6 +364,9 @@ export class FileSource extends ExplorerSource<FileNode> {
     } = {},
   ): Promise<[FileNode | undefined, Notifier[]]> {
     path = normalizePath(path);
+    if (this.filterForReveal(path, startNode.fullpath)) {
+      return [undefined, []];
+    }
     const notifiers: Notifier[] = [];
 
     const revealRecursive = async (
@@ -357,14 +400,13 @@ export class FileSource extends ExplorerSource<FileNode> {
               compact,
               uncompact: false,
               render: false,
-              load: false,
             });
             break;
           }
         }
         if (foundNode) {
           if (isRender) {
-            const renderNotifier = await this.view.renderNotifier({
+            const renderNotifier = await renderer.renderNotifier({
               node: startNode,
             });
             if (renderNotifier) {
@@ -380,7 +422,6 @@ export class FileSource extends ExplorerSource<FileNode> {
         }
         return foundNode;
       }
-      return;
     };
 
     const foundNode = await revealRecursive(path, {
@@ -433,7 +474,7 @@ export class FileSource extends ExplorerSource<FileNode> {
           const writable = await fsAccess(fullpath, fs.constants.W_OK);
           const readable = await fsAccess(fullpath, fs.constants.R_OK);
           const directory =
-            isWindows && /^[A-Za-z]:[\\\/]$/.test(fullpath)
+            isWindows && /^[A-Za-z]:[\\/]$/.test(fullpath)
               ? true
               : stat
               ? stat.isDirectory()
@@ -444,7 +485,7 @@ export class FileSource extends ExplorerSource<FileNode> {
             expandable: directory,
             name: filename,
             fullpath,
-            directory: directory,
+            directory,
             readonly: !writable && readable,
             executable,
             readable,
@@ -455,8 +496,7 @@ export class FileSource extends ExplorerSource<FileNode> {
           };
           return child;
         } catch (error) {
-          onError(error);
-          return;
+          logger.error(error);
         }
       }),
     );

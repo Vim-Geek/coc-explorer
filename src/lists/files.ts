@@ -1,26 +1,23 @@
 // modified from: https://github.com/neoclide/coc-lists/blob/3c117046b54130157006f8ddf048304507499260/src/files.ts
 
 import { ChildProcess, spawn } from 'child_process';
-import {
-  BasicList,
-  ListContext,
-  ListTask,
-  Neovim,
-  Uri,
-  workspace,
-  ListItem,
-} from 'coc.nvim';
+import { ListTask, Location, Range, Uri, workspace } from 'coc.nvim';
 import { EventEmitter } from 'events';
 import minimatch from 'minimatch';
 import pathLib from 'path';
 import readline from 'readline';
-import { Location, Range } from 'vscode-languageserver-types';
-import { executable, isWindows } from '../util';
+import { executable, isWindows, logger } from '../util';
+import { registerList } from './runner';
 
 class Task extends EventEmitter implements ListTask {
   private processes: ChildProcess[] = [];
 
-  start(cmd: string, args: string[], cwds: string[], patterns: string[]): void {
+  start(
+    cmd: string,
+    args: string[],
+    cwds: string[],
+    excludePatterns: string[],
+  ): void {
     let remain = cwds.length;
     for (const cwd of cwds) {
       const process = spawn(cmd, args, { cwd });
@@ -30,18 +27,18 @@ class Task extends EventEmitter implements ListTask {
       });
       const rl = readline.createInterface(process.stdout);
       const range = Range.create(0, 0, 0, 0);
-      const hasPattern = patterns.length > 0;
+      const hasPattern = excludePatterns.length > 0;
       process.stderr.on('data', (chunk) => {
-        // eslint-disable-next-line no-console
         console.error(chunk.toString('utf8'));
       });
 
       rl.on('line', (line) => {
         const file = pathLib.join(cwd, line);
-        if (hasPattern && patterns.some((p) => minimatch(file, p))) {
+        if (hasPattern && excludePatterns.some((p) => minimatch(file, p))) {
           return;
         }
-        const location = Location.create(Uri.file(file).toString(), range);
+        const finalPath = file.replace(/\/$/, '');
+        const location = Location.create(Uri.file(finalPath).toString(), range);
         this.emit('data', {
           label: line,
           location,
@@ -65,75 +62,71 @@ class Task extends EventEmitter implements ListTask {
   }
 }
 
-export default class FileList extends BasicList {
-  readonly name = 'explorerFiles';
-  readonly defaultAction = 'reveal';
+const config = workspace.getConfiguration('list.source.files');
+
+type Arg = {
   revealCallback?: (location: Location) => void | Promise<void>;
   rootPath?: string;
-  recursive: boolean = false;
-  showIgnore: boolean = true;
-  showHidden: boolean = false;
+  recursive: boolean;
+  showIgnores: boolean;
+  showHidden: boolean;
+};
 
-  constructor(nvim: Neovim) {
-    super(nvim);
-    this.addLocationActions();
-    this.addAction('reveal', async (item) => {
-      const loc = await this.convertLocation(item.location!);
-      if (this.revealCallback) {
-        await this.revealCallback(loc);
-      }
-    });
-  }
-
-  async getCommand(): Promise<{ cmd: string; args: string[] }> {
-    const args: string[] = [];
-    if (await executable('fd')) {
-      args.push('--color', 'never');
-      if (this.showIgnore) {
-        args.push('--no-ignore');
-      }
-      if (this.showHidden) {
-        args.push('--hidden');
-      }
-      if (!this.recursive) {
-        args.push('--max-depth', '1');
-      }
-      return { cmd: 'fd', args };
-    } else if (isWindows) {
-      args.push('/a-D', '/B');
-      if (this.recursive) {
-        args.push('/S');
-      }
-      return { cmd: 'dir', args };
-    } else if (await executable('find')) {
-      args.push('.');
-      if (!this.recursive) {
-        args.push('-maxdepth', '1');
-      }
-      return { cmd: 'find', args };
-    } else {
-      throw new Error('Unable to find command for files list.');
+async function getCommand(arg: Arg): Promise<{ name: string; args: string[] }> {
+  const args: string[] = [];
+  if (await executable('fd')) {
+    args.push('--color', 'never');
+    if (arg.showIgnores) {
+      args.push('--no-ignore');
     }
-  }
-
-  async loadItems(
-    _context: ListContext,
-  ): Promise<ListItem[] | ListTask | undefined> {
-    if (!this.rootPath) {
-      return;
+    if (arg.showHidden) {
+      args.push('--hidden');
     }
-    const res = await this.getCommand();
-    if (!res) {
-      return;
+    if (!arg.recursive) {
+      args.push('--max-depth', '1');
     }
-    const task = new Task();
-    const excludePatterns = this.getConfig().get<string[]>(
-      'excludePatterns',
-      [],
-    );
-    task.start(res.cmd, res.args, [this.rootPath], excludePatterns);
-    return task;
+    return { name: 'fd', args };
+  } else if (isWindows) {
+    args.push('/a-D', '/B');
+    if (arg.recursive) {
+      args.push('/S');
+    }
+    return { name: 'dir', args };
+  } else if (await executable('find')) {
+    args.push('.');
+    if (!arg.recursive) {
+      args.push('-maxdepth', '1');
+    }
+    return { name: 'find', args };
+  } else {
+    throw new Error('Unable to find command for files list.');
   }
 }
 
-export const fileList = new FileList(workspace.nvim);
+export const fileList = registerList<Arg, any>({
+  name: 'explorerFiles',
+  defaultAction: 'reveal',
+  async loadItems(arg) {
+    if (!arg.rootPath) {
+      return;
+    }
+    const cmd = await getCommand(arg);
+    if (!cmd) {
+      return;
+    }
+    logger.info(`file list task cmd: ${cmd.name}`);
+    const task = new Task();
+    const excludePatterns = config.get<string[]>('excludePatterns', []);
+    task.start(cmd.name, cmd.args, [arg.rootPath], excludePatterns);
+    return task;
+  },
+  init() {
+    this.addLocationActions();
+    this.addAction('reveal', async ({ arg, item }) => {
+      const loc = await this.convertLocation(item.location!);
+      if (arg.revealCallback) {
+        await arg.revealCallback(loc);
+      }
+    });
+  },
+});

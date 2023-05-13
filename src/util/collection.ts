@@ -20,9 +20,9 @@ export function mapGetWithDefault<K, V, M extends Map<K, V>>(
   map: M,
   key: K,
   fetchDefault: () => V,
-) {
+): V {
   let v = map.get(key);
-  if (!v) {
+  if (v === undefined) {
     v = fetchDefault();
     map.set(key, v);
   }
@@ -45,7 +45,6 @@ export function scanIndexPrev<T>(
     const index = findLastIndex(list.slice(startIndex + 1), condition);
     return index === -1 ? undefined : index + startIndex + 1;
   }
-  return;
 }
 
 export function scanIndexNext<T>(
@@ -64,5 +63,4 @@ export function scanIndexNext<T>(
     const index = findIndex(list.slice(0, startIndex), condition);
     return index === -1 ? undefined : index;
   }
-  return;
 }

@@ -1,6 +1,6 @@
-import { Explorer } from '../explorer';
-import { HighlightCommand, HighlightPosition } from '../highlight/types';
-import {
+import type { Explorer } from '../explorer';
+import type { HighlightCommand, HighlightPosition } from '../highlight/types';
+import type {
   Drawable,
   DrawBlock,
   DrawContent,
@@ -16,10 +16,10 @@ import {
   handlePadding,
   isEmptyDrawableList,
 } from '../painter/util';
-import { byteLength, flatten, sum } from '../util';
-import { Column } from './columnRegistrar';
-import { BaseTreeNode } from './source';
-import { TemplatePart } from './sourcePainters';
+import { flatten, sum } from '../util';
+import type { Column } from './columnRegistrar';
+import type { BaseTreeNode } from './source';
+import type { TemplatePart } from './sourcePainters';
 
 export class ViewPainter {
   constructor(public explorer: Explorer) {}
@@ -67,15 +67,15 @@ export class ViewRowPainter {
     );
     if (!flexible || usedWidth === fullwidth) {
       drawContents = flatten(
-        drawableList.map((item):
-          | DrawContentWithWidth
-          | DrawContentWithWidth[] => {
-          if (item.type === 'group') {
-            return item.contents;
-          } else {
-            return item;
-          }
-        }),
+        drawableList.map(
+          (item): DrawContentWithWidth | DrawContentWithWidth[] => {
+            if (item.type === 'group') {
+              return item.contents;
+            } else {
+              return item;
+            }
+          },
+        ),
       );
     } else if (usedWidth < fullwidth) {
       drawContents = await handleGrow(fullwidth, usedWidth, drawableList);
@@ -88,7 +88,7 @@ export class ViewRowPainter {
     let content = '';
     let col = 0;
     for (const drawContent of drawContents) {
-      const size = byteLength(drawContent.content);
+      const size = drawContent.content.length;
       if (drawContent.group) {
         highlightPositions.push({
           group: drawContent.group,
@@ -116,17 +116,18 @@ export class ViewRowPainter {
       drawGroup,
       unicode = false,
     }: {
-      hl?: HighlightCommand;
+      hl?: string | HighlightCommand;
       width?: number;
       drawGroup?: DrawGroup;
       unicode?: boolean;
     } = {},
   ) {
+    const group = hl ? (typeof hl === 'string' ? hl : hl.group) : undefined;
     const drawContent: DrawContent = {
       type: 'content',
       content,
       unicode,
-      group: hl?.group,
+      group,
       width,
     };
     if (drawGroup) {

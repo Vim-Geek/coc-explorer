@@ -1,9 +1,10 @@
-import { ExplorerConfig } from '../config';
+import type { ExplorerConfig } from '../config';
 import { diagnosticManager } from '../diagnostic/manager';
 import { getGitFormatHighlight, gitHighlights } from '../git/highlights';
 import { gitManager } from '../git/manager';
 import { GitFormat, GitMixedStatus } from '../git/types';
 import { fileHighlights } from '../source/sources/file/fileSource';
+import type { HighlightCommand } from './types';
 
 export namespace FilenameHighlight {
   export type HighlightTypes = 'diagnosticError' | 'diagnosticWarning' | 'git';
@@ -25,18 +26,18 @@ export class FilenameHighlight {
       ) === true;
 
     this.enabledGitStatus =
-      enabledCompletely || config.get<boolean>(configKey + '.git', false);
+      enabledCompletely || config.get<boolean>(`${configKey}.git`, false);
     this.enabledErrorStatus =
       enabledCompletely ||
-      config.get<boolean>(configKey + '.diagnosticError', false);
+      config.get<boolean>(`${configKey}.diagnosticError`, false);
     this.enabledWarningStatus =
       enabledCompletely ||
-      config.get<boolean>(configKey + '.diagnosticWarning', false);
+      config.get<boolean>(`${configKey}.diagnosticWarning`, false);
   }
 
   getGitHighlight(status: GitMixedStatus) {
     if (status.x === GitFormat.ignored) {
-      return gitHighlights.gitIgnored;
+      return gitHighlights.ignored;
     }
 
     return getGitFormatHighlight(status.y);
@@ -46,7 +47,7 @@ export class FilenameHighlight {
     fullpath: string,
     isDirectory: boolean,
     highlightOrder: FilenameHighlight.HighlightTypes[],
-  ) {
+  ): HighlightCommand | undefined {
     for (const type of highlightOrder) {
       if (type === 'diagnosticWarning') {
         if (this.enabledWarningStatus) {

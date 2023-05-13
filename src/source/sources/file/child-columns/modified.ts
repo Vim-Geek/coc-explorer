@@ -1,7 +1,5 @@
 import { fileColumnRegistrar } from '../fileColumnRegistrar';
 import { fileHighlights } from '../fileSource';
-import { debounce } from '../../../../util';
-import { argOptions } from '../../../../arg/argOptions';
 
 fileColumnRegistrar.registerColumn(
   'child',
@@ -9,13 +7,10 @@ fileColumnRegistrar.registerColumn(
   ({ source, subscriptions }) => {
     return {
       async init() {
-        const position = await source.explorer.args.value(argOptions.position);
-        if (position !== 'floating') {
+        if (!source.explorer.isFloating) {
           subscriptions.push(
-            source.bufManager.onModified(
-              debounce(500, async (fullpath) => {
-                await source.view.renderPaths([fullpath]);
-              }),
+            source.bufManager.onModifiedDebounce((fullpaths) =>
+              source.view.renderPaths(fullpaths),
             ),
           );
         }
@@ -23,16 +18,17 @@ fileColumnRegistrar.registerColumn(
       draw() {
         return {
           labelOnly: true,
-          labelVisible: ({ node }) => source.bufManager.modified(node.fullpath),
+          labelVisible: ({ node }) =>
+            source.bufManager.modified(node.fullpath, {
+              directory: node.directory,
+            }),
           drawNode(row, { node, nodeIndex }) {
-            let modified: boolean = false;
-            if (node.directory) {
-              if (!source.view.isExpanded(node)) {
-                modified = source.bufManager.modifiedPrefix(node.fullpath);
-              }
-            } else {
-              modified = source.bufManager.modified(node.fullpath);
-            }
+            const modified: boolean = source.bufManager.modified(
+              node.fullpath,
+              {
+                directory: node.directory && !source.view.isExpanded(node),
+              },
+            );
             row.add(modified ? '+' : '', {
               hl: fileHighlights.readonly,
             });

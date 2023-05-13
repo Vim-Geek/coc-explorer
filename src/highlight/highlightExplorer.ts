@@ -1,12 +1,12 @@
 import { workspace } from 'coc.nvim';
-import { Explorer } from '../explorer';
+import type { Explorer } from '../explorer';
 import { hlGroupManager } from './manager';
-import { HighlightPositionWithLine } from './types';
+import type { HighlightPositionWithLine } from './types';
 
 export class HighlightExplorer {
   constructor(public readonly explorer: Explorer) {}
 
-  clearHighlightsNotify(hlSrcId: number, lineStart?: number, lineEnd?: number) {
+  clearHighlightsNotify(hlSrcId: string, lineStart?: number, lineEnd?: number) {
     hlGroupManager.clearHighlightsNotify(
       this.explorer,
       hlSrcId,
@@ -16,21 +16,21 @@ export class HighlightExplorer {
   }
 
   addHighlightsNotify(
-    hlSrcId: number,
+    hlSrcId: string,
     highlights: HighlightPositionWithLine[],
   ) {
     hlGroupManager.addHighlightsNotify(this.explorer, hlSrcId, highlights);
   }
 
-  async addSyntax() {
+  async bootSyntax() {
     const winnr = await this.explorer.winnr;
-    const curWinnr = await workspace.nvim.call('winnr');
+    const curWinnr: number = await workspace.nvim.call('winnr');
     if (winnr) {
       workspace.nvim.pauseNotification();
       if (winnr !== curWinnr) {
         workspace.nvim.command(`${winnr}wincmd w`, true);
       }
-      hlGroupManager.addHighlightSyntaxNotify();
+      hlGroupManager.bootHighlightSyntaxNotify();
       if (winnr !== curWinnr) {
         workspace.nvim.command(`${curWinnr}wincmd w`, true);
       }

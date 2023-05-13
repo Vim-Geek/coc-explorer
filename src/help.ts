@@ -1,33 +1,38 @@
 import { Disposable, workspace, disposeAll } from 'coc.nvim';
-import { conditionActionRules, waitAction } from './actions/special';
-import { Explorer } from './explorer';
+import {
+  conditionActionRules,
+  noopAction,
+  waitAction,
+} from './actions/special';
+import type { Explorer } from './explorer';
 import { keyMapping } from './mappings';
 import { hlGroupManager } from './highlight/manager';
-import { BaseTreeNode, ExplorerSource } from './source/source';
+import type { BaseTreeNode, ExplorerSource } from './source/source';
 import { ViewPainter, ViewRowPainter } from './source/viewPainter';
-import { Action, ActionExp, Mappings } from './actions/types';
-import { ActionRegistrar } from './actions/registrar';
+import type { Action, ActionExp, Mappings } from './actions/types';
+import type { ActionRegistrar } from './actions/registrar';
 import { ActionMenu } from './actions/menu';
-import {
+import type {
   HighlightPosition,
   HighlightPositionWithLine,
 } from './highlight/types';
-import { DrawBlock } from './painter/types';
+import type { DrawBlock } from './painter/types';
 import { Notifier } from 'coc-helper';
+import { clearMappings, executeMappings } from './mappings/manager';
 
-const hl = hlGroupManager.linkGroup.bind(hlGroupManager);
+const hlg = hlGroupManager.linkGroup.bind(hlGroupManager);
 const helpHightlights = {
-  line: hl('HelpLine', 'Operator'),
-  hint: hl('HelpHint', 'Comment'),
-  title: hl('HelpTitle', 'Boolean'),
-  subtitle: hl('HelpSubTitle', 'Label'),
-  mappingKey: hl('HelpMappingKey', 'PreProc'),
-  action: hl('HelpAction', 'Identifier'),
-  column: hl('HelpColumn', 'Identifier'),
-  arg: hl('HelpArg', 'Identifier'),
-  description: hl('HelpDescription', 'Comment'),
-  type: hl('HelperType', 'Type'),
-  conditional: hl('HelpConditional', 'Conditional'),
+  line: hlg('HelpLine', 'Operator'),
+  hint: hlg('HelpHint', 'Comment'),
+  title: hlg('HelpTitle', 'Boolean'),
+  subtitle: hlg('HelpSubTitle', 'Label'),
+  mappingKey: hlg('HelpMappingKey', 'PreProc'),
+  action: hlg('HelpAction', 'Identifier'),
+  column: hlg('HelpColumn', 'Identifier'),
+  arg: hlg('HelpArg', 'Identifier'),
+  description: hlg('HelpDescription', 'Comment'),
+  type: hlg('HelperType', 'Type'),
+  conditional: hlg('HelpConditional', 'Conditional'),
 };
 
 interface MappingActionContext {
@@ -36,19 +41,20 @@ interface MappingActionContext {
   isWait: boolean;
 }
 
-const helpHlSrcId = workspace.createNameSpace('coc-explorer-help');
+// const helpHlSrcId = workspace.createNameSpace('coc-explorer-help');
+const helpHlSrcId = 'coc-explorer-help';
 
 export class HelpPainter {
-  painter: ViewPainter;
-  drawnResults: {
+  private painter: ViewPainter;
+  private drawnResults: {
     highlightPositions: HighlightPosition[];
     content: string;
   }[] = [];
-  registeredActions: ActionRegistrar.Map<BaseTreeNode<any>>;
+  private registeredActions: ActionRegistrar.ActionMap<BaseTreeNode<any>>;
 
   constructor(
     private explorer: Explorer,
-    private source: ExplorerSource<any>,
+    private source: ExplorerSource<BaseTreeNode<any>>,
     private width: number,
   ) {
     this.painter = new ViewPainter(explorer);
@@ -83,8 +89,9 @@ export class HelpPainter {
       row.add(`(${action.args.join(',')})`, { hl: helpHightlights.arg });
     }
     row.add(' ');
-    if (action.name in this.registeredActions) {
-      row.add(this.registeredActions[action.name].description, {
+    const registeredAction = this.registeredActions.get(action.name);
+    if (registeredAction) {
+      row.add(registeredAction.description, {
         hl: helpHightlights.description,
       });
     }
@@ -117,7 +124,7 @@ export class HelpPainter {
       row.add(' - ');
     }
     if (ctx.isWait) {
-      row.add(waitAction.helpDescription + ' ', { hl: helpHightlights.type });
+      row.add(`${waitAction.helpDescription} `, { hl: helpHightlights.type });
     }
   }
 
@@ -129,13 +136,19 @@ export class HelpPainter {
     await this.drawRow((row) => {
       this.drawMappingsPrefix(indent, row, ctx);
 
+      if (action.name === noopAction.name) {
+        row.add(noopAction.helpDescription, { hl: helpHightlights.type });
+        return;
+      }
+
       row.add(action.name, { hl: helpHightlights.action });
       if (action.args) {
         row.add(`(${action.args.join(',')})`, { hl: helpHightlights.arg });
       }
       row.add(' ');
-      if (action.name in this.registeredActions) {
-        row.add(this.registeredActions[action.name].description, {
+      const registeredAction = this.registeredActions.get(action.name);
+      if (registeredAction) {
+        row.add(registeredAction.description, {
           hl: helpHightlights.description,
         });
       }
@@ -167,7 +180,7 @@ export class HelpPainter {
         if (rule) {
           await this.drawRow((row) => {
             this.drawMappingsPrefix(indent, row, ctx);
-            row.add('if ' + rule.getHelpDescription(action.args), {
+            row.add(`if ${rule.getHelpDescription(action.args)}`, {
               hl: helpHightlights.conditional,
             });
           });
@@ -175,14 +188,14 @@ export class HelpPainter {
             actionExp[i + 1],
             actionExp[i + 2],
           ];
-          await this.drawMappingsActionExp(indent + '  ', trueAction, ctx);
+          await this.drawMappingsActionExp(`${indent}  `, trueAction, ctx);
           await this.drawRow((row) => {
             row.add(indent);
             row.add('else', {
               hl: helpHightlights.conditional,
             });
           });
-          await this.drawMappingsActionExp(indent + '  ', falseAction, ctx);
+          await this.drawMappingsActionExp(`${indent}  `, falseAction, ctx);
           i += 2;
           continue;
         }
@@ -215,7 +228,9 @@ export class HelpPainter {
         if (
           !this.anyAction(
             actionExp,
-            (action) => action.name in this.registeredActions,
+            (action) =>
+              this.registeredActions.has(action.name) ||
+              action.name === noopAction.name,
           )
         ) {
           continue;
@@ -245,7 +260,7 @@ export class HelpPainter {
       });
     });
 
-    for (const [name, action] of Object.entries(this.registeredActions)) {
+    for (const [name, action] of this.registeredActions) {
       await this.drawRow((row) => {
         row.add(' ');
         row.add(name, { hl: helpHightlights.action });
@@ -295,8 +310,8 @@ export class HelpPainter {
         hl: helpHightlights.title,
       });
     });
-    const allColumns = this.source.sourcePainters.columnRegistrar
-      .registeredColumns;
+    const allColumns =
+      this.source.view.sourcePainters.columnRegistrar.registeredColumns;
     for (const [type, columns] of allColumns) {
       await this.drawRow((row) => {
         row.add(`  Type: ${type}`, { hl: helpHightlights.subtitle });
@@ -355,7 +370,7 @@ export async function showHelp(
   await helpPainter.drawColumns();
   await helpPainter.render();
 
-  await explorer.explorerManager.clearMappings();
+  await clearMappings();
 
   const disposables: Disposable[] = [];
   ['<esc>', 'q', '?'].forEach((key) => {
@@ -366,10 +381,12 @@ export async function showHelp(
         async () => {
           disposeAll(disposables);
           await quitHelp(explorer);
-          await Notifier.runAll([
-            await explorer.renderAllNotifier(),
-            await source.locator.gotoNodeNotifier(storeNode),
-          ]);
+          await explorer.view.sync(async (r) => {
+            await Notifier.runAll([
+              await r.renderAllNotifier(),
+              await source.locator.gotoNodeNotifier(storeNode),
+            ]);
+          });
         },
         true,
       ),
@@ -378,6 +395,6 @@ export async function showHelp(
 }
 
 export async function quitHelp(explorer: Explorer) {
-  await explorer.explorerManager.executeMappings();
+  await executeMappings();
   explorer.view.isHelpUI = false;
 }

@@ -1,7 +1,13 @@
 import { workspace } from 'coc.nvim';
-import { ActionSource } from '../../../actions/actionSource';
-import { prompt } from '../../../util';
-import { BufferNode, BufferSource } from './bufferSource';
+import type { ActionSource } from '../../../actions/actionSource';
+import { bufferTabOnly } from '../../../config';
+import { tabContainerManager } from '../../../container';
+import {
+  leaveEmptyInWinids,
+  prompt,
+  winidsByBufnrInCurTab,
+} from '../../../util';
+import type { BufferNode, BufferSource } from './bufferSource';
 
 export function loadBufferActions(
   action: ActionSource<BufferSource, BufferNode>,
@@ -36,13 +42,29 @@ export function loadBufferActions(
   action.addNodeAction(
     'delete',
     async ({ node }) => {
+      if (bufferTabOnly()) {
+        // remove buffer in tab container
+        await tabContainerManager.curTabDelBufnr(node.bufnr);
+        if (tabContainerManager.existBufnr(node.bufnr)) {
+          const winids = await winidsByBufnrInCurTab(node.bufnr);
+          await leaveEmptyInWinids(winids);
+          return;
+        }
+      }
+
       if (
-        buffer.bufManager.modified(node.fullpath) &&
+        buffer.bufManager.modified(node.fullpath, {
+          directory: false,
+        }) &&
         (await prompt('Buffer is being modified, delete it?')) !== 'yes'
       ) {
         return;
       }
-      await nvim.command(`bdelete! ${node.bufnr}`);
+      await buffer.bufManager.removeBufNode(node, {
+        skipModified: true,
+        bwipeout: false,
+        directory: false,
+      });
       await buffer.load(node, { force: true });
     },
     'delete buffer',
@@ -52,12 +74,18 @@ export function loadBufferActions(
     'deleteForever',
     async ({ node }) => {
       if (
-        buffer.bufManager.modified(node.fullpath) &&
+        buffer.bufManager.modified(node.fullpath, {
+          directory: false,
+        }) &&
         (await prompt('Buffer is being modified, wipeout it?')) !== 'yes'
       ) {
         return;
       }
-      await nvim.command(`bwipeout! ${node.bufnr}`);
+      await buffer.bufManager.removeBufNode(node, {
+        skipModified: true,
+        bwipeout: true,
+        directory: false,
+      });
       await buffer.load(node, { force: true });
     },
     'bwipeout buffer',
