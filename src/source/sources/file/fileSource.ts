@@ -131,12 +131,12 @@ export class FileSource extends ExplorerSource<FileNode> {
     const hiddenRules = this.getHiddenRules();
 
     const { basename, extensions } = getExtensions(filename);
-    const extname = extensions[extensions.length - 1];
-    if (!extname) return false;
+    const extname =
+      extensions.length === 0 ? '' : extensions[extensions.length - 1];
 
     return (
       hiddenRules.filenames.includes(basename) ||
-      hiddenRules.extensions.includes(extname) ||
+      hiddenRules.extensions.includes(extname!) ||
       hiddenRules.patternMatches.some((pattern) =>
         new RegExp(pattern).test(filename),
       )
