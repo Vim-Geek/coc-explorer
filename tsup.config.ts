@@ -9,5 +9,6 @@ export default defineConfig({
   format: ['cjs'],
   external: ['coc.nvim', 'trash'],
   metafile: false,
-  outDir: 'lib',
+  outDir:
+    '/Users/xusiyuan/.config/coc/extensions/node_modules/coc-explorer/lib',
 });
